@@ -95,7 +95,10 @@ def run_single_job(job: dict) -> dict:
 
         if job["type"] == "ablation":
             # Initialize models (per-process to avoid pickling issues)
-            embedding_model = EmbeddingModel(job.get("embedding_model", "all-MiniLM-L6-v2"))
+            embedding_model = EmbeddingModel(
+                job.get("embedding_model", "all-MiniLM-L6-v2"),
+                cache_dir=job.get("cache_dir", "data"),
+            )
 
             if job.get("dry_run"):
                 llm_client = DryRunLLMClient(model=job.get("llm_model", "gpt-4o-mini"))
@@ -178,6 +181,10 @@ def parse_args():
 
 def main():
     args = parse_args()
+
+    # Load API key from .env
+    from dotenv import load_dotenv
+    load_dotenv()
 
     datasets = ALL_DATASETS if args.dataset.lower() == "all" else args.dataset.split(",")
     configs = ALL_CONFIGS if args.configs.lower() == "all" else args.configs.split(",")
