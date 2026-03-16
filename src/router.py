@@ -8,6 +8,7 @@ Implements the three algorithms from the paper:
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import time
@@ -19,7 +20,7 @@ from sklearn.cluster import KMeans
 from sklearn.metrics.pairwise import cosine_similarity
 
 from .data import Dataset, Event, Subscription
-from .llm import LLMClient, LLMResponse
+from .llm import DryRunLLMClient, LLMClient, LLMResponse
 from .embeddings import EmbeddingModel
 
 logger = logging.getLogger(__name__)
@@ -115,8 +116,9 @@ class RouterConfig:
     # Embedding
     embedding_model: str = "all-MiniLM-L6-v2"
 
-    # Parallelism (for cost model; actual parallelism handled by LLM client)
+    # Parallelism
     max_parallel: int = 10
+    use_async: bool = True             # use async LLM calls for parallel matching
 
     # Random seed (for k-means)
     seed: int = 42
@@ -340,22 +342,11 @@ class NeuralRouter:
 
         # Step 3: LLM matching per cluster
         t_llm = time.time()
-        all_results: dict[str, MatchResult] = {}
 
-        for cluster in self.clusters:
-            if not cluster.queue:
-                continue
-
-            cluster_results = self._match_cluster(cluster)
-            for result in cluster_results:
-                if result.event_id in all_results:
-                    # Merge results from multiple clusters
-                    existing = all_results[result.event_id]
-                    existing.matched_subscription_ids.extend(
-                        result.matched_subscription_ids
-                    )
-                else:
-                    all_results[result.event_id] = result
+        if self.config.use_async and not isinstance(self.llm, DryRunLLMClient):
+            all_results = self._run_async_matching()
+        else:
+            all_results = self._run_sync_matching()
 
         self.stats.llm_inference_time_s = time.time() - t_llm
 
@@ -495,6 +486,144 @@ class NeuralRouter:
                     results.append(MatchResult(event_id=event.id, matched_subscription_ids=[]))
 
         return results
+
+    def _run_sync_matching(self) -> dict[str, MatchResult]:
+        """Run LLM matching sequentially (original path)."""
+        all_results: dict[str, MatchResult] = {}
+        for cluster in self.clusters:
+            if not cluster.queue:
+                continue
+            cluster_results = self._match_cluster(cluster)
+            for result in cluster_results:
+                if result.event_id in all_results:
+                    existing = all_results[result.event_id]
+                    existing.matched_subscription_ids.extend(
+                        result.matched_subscription_ids
+                    )
+                else:
+                    all_results[result.event_id] = result
+        return all_results
+
+    def _run_async_matching(self) -> dict[str, MatchResult]:
+        """Run LLM matching with async parallelism via asyncio.
+
+        Builds all prompts upfront across all clusters, fires them
+        concurrently with a semaphore, then parses and merges results.
+        """
+        try:
+            loop = asyncio.get_event_loop()
+            if loop.is_running():
+                import concurrent.futures
+                with concurrent.futures.ThreadPoolExecutor() as pool:
+                    future = pool.submit(asyncio.run, self._async_match_all_clusters())
+                    return future.result()
+            else:
+                return loop.run_until_complete(self._async_match_all_clusters())
+        except RuntimeError:
+            return asyncio.run(self._async_match_all_clusters())
+
+    async def _async_match_all_clusters(self) -> dict[str, MatchResult]:
+        """Async implementation: build all prompts, fire concurrently, merge."""
+        import litellm
+
+        semaphore = asyncio.Semaphore(self.config.max_parallel)
+
+        # Phase 1: Build all (prompt, cluster, batch) tuples upfront
+        prompt_tasks: list[tuple[str, Cluster, list[Event]]] = []
+
+        for cluster in self.clusters:
+            if not cluster.queue:
+                continue
+            subs = cluster.active_subscriptions
+            events = cluster.queue
+
+            # Compute batch size (same logic as _match_cluster)
+            avg_sub_tokens = self._estimate_tokens(
+                "\n".join(f"- [{s.id}] {s.description}" for s in subs)
+            ) / max(len(subs), 1) * len(subs)
+            avg_event_tokens = 50
+
+            available = (
+                self.config.context_window
+                - self.config.t_inst
+                - avg_sub_tokens
+                - self.config.t_resp
+            )
+            batch_size = max(1, int(available / max(avg_event_tokens, 1))) if available > 0 else 1
+
+            for i in range(0, len(events), batch_size):
+                batch = events[i:i + batch_size]
+                prompt = self._build_match_prompt(subs, batch)
+                prompt_tasks.append((prompt, cluster, batch))
+
+        logger.info(f"Async matching: {len(prompt_tasks)} prompts across {len(self.clusters)} clusters")
+
+        # Phase 2: Fire all prompts concurrently
+        async def _invoke_one(prompt: str) -> LLMResponse:
+            async with semaphore:
+                t0 = time.time()
+                try:
+                    response = await litellm.acompletion(
+                        model=self.config.llm_model,
+                        messages=[{"role": "user", "content": prompt}],
+                        temperature=self.config.llm_temperature,
+                        max_tokens=4096,
+                    )
+                    text = response.choices[0].message.content or ""
+                    prompt_tokens = response.usage.prompt_tokens if response.usage else 0
+                    response_tokens = response.usage.completion_tokens if response.usage else 0
+                    latency = time.time() - t0
+                    return LLMResponse(
+                        text=text,
+                        prompt_tokens=prompt_tokens,
+                        response_tokens=response_tokens,
+                        latency_s=latency,
+                        model=self.config.llm_model,
+                    )
+                except Exception as e:
+                    logger.error(f"Async LLM call failed after {time.time() - t0:.2f}s: {e}")
+                    raise
+
+        coros = [_invoke_one(prompt) for prompt, _, _ in prompt_tasks]
+        responses = await asyncio.gather(*coros, return_exceptions=True)
+
+        # Phase 3: Parse responses and merge results
+        all_results: dict[str, MatchResult] = {}
+
+        for (prompt, cluster, batch), resp in zip(prompt_tasks, responses):
+            if isinstance(resp, BaseException):
+                logger.warning(f"Async call failed for cluster {cluster.id}: {resp}")
+                for event in batch:
+                    if event.id not in all_results:
+                        all_results[event.id] = MatchResult(
+                            event_id=event.id, matched_subscription_ids=[]
+                        )
+                continue
+
+            # Track stats
+            self.stats.llm_invocations += 1
+            self.stats.total_prompt_tokens += resp.prompt_tokens
+            self.stats.total_response_tokens += resp.response_tokens
+
+            try:
+                batch_results = self._parse_match_response(resp.text, batch)
+            except Exception as e:
+                logger.warning(f"Failed to parse async response for cluster {cluster.id}: {e}")
+                batch_results = [
+                    MatchResult(event_id=ev.id, matched_subscription_ids=[])
+                    for ev in batch
+                ]
+
+            for result in batch_results:
+                if result.event_id in all_results:
+                    existing = all_results[result.event_id]
+                    existing.matched_subscription_ids.extend(
+                        result.matched_subscription_ids
+                    )
+                else:
+                    all_results[result.event_id] = result
+
+        return all_results
 
     def _build_match_prompt(
         self,

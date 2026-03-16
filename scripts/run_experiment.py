@@ -280,8 +280,8 @@ def main():
             api_key=os.getenv("OPENAI_API_KEY"),
         )
 
-    # Initialize embedding model
-    embedding_model = EmbeddingModel(args.embedding_model)
+    # Initialize embedding model (with disk cache to avoid recomputing across seeds)
+    embedding_model = EmbeddingModel(args.embedding_model, cache_dir=args.cache_dir)
 
     all_results = []
 
