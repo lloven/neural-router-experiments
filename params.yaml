@@ -1,0 +1,28 @@
+# params.yaml -- DVC-tracked experiment parameters
+#
+# DVC monitors this file for changes. When a parameter changes,
+# only the affected pipeline stages are re-run.
+# See also: configs/defaults.yaml (human-readable reference)
+
+datasets: [D1, D2, D3]
+
+seeds: [42, 123, 456, 789, 1024]
+
+ablation:
+  configs: [A0, A1, A2, A3, A4, A5, A6]
+  kappa: 3
+  tau: 0.3
+  embedding_model: "all-MiniLM-L6-v2"
+  llm_model: "gpt-4o-mini"
+
+baselines: [bm25, sbert, cross_encoder, tfidf, glove, word2vec]
+
+sensitivity:
+  seeds: [42]           # single seed for speed during sweeps
+  k_values: [1, 5, 10, 15, 19, 25, 30]
+  tau_values: [0.0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9]
+  kappa_values: [1, 2, 3, 5, 7, 10]
+
+scaling:
+  seed: 42
+  event_counts: [50, 100, 200, 500, 1000, 2000, 5000]

@@ -1,9 +1,22 @@
 """Dataset loading and preprocessing for Neural Router experiments.
 
-Three datasets:
-  D1: CardiffNLP Tweet Topic (multi-label, 19 topics, short tweets)
-  D2: MultiEURLEX (multi-label, EUROVOC level-2, long legal documents)
-  D3: MN-DS (single-label at level-2, 109 IPTC topics, medium news articles)
+Provides a unified interface over three benchmark datasets used to evaluate
+the Neural Router's content-based publish/subscribe matching (Table 1 in the
+paper):
+
+  D1: CardiffNLP Tweet Topic -- multi-label, 19 topics, short tweets (~25 words)
+  D2: MultiEURLEX           -- multi-label, 127 EUROVOC level-2 labels, long EU
+                               legal documents (~700 words, truncated to 2000)
+  D3: MN-DS                 -- single-label at level-2, 109 IPTC Media Topics,
+                               medium news articles (~250 words)
+
+Key abstractions:
+  Subscription  -- a topic (filter) that events can match against
+  Event         -- a document (notification) to be routed to matching subscriptions
+  Dataset       -- a loaded corpus with events, subscriptions, and metadata
+
+Usage:
+    dataset = load_dataset_by_name("D1", cache_dir="data", max_events=500)
 """
 
 from __future__ import annotations
@@ -22,7 +35,12 @@ logger = logging.getLogger(__name__)
 
 @dataclass
 class Subscription:
-    """A subscription (topic) that events can match against."""
+    """A subscription (topic/filter) in the pub/sub model.
+
+    Maps to a single node in the subscription set S (Definition 1 in the paper).
+    The ``description`` field is the natural-language text passed to the LLM
+    and the embedding model for semantic matching.
+    """
     id: str
     name: str
     description: str  # natural-language description for LLM matching
@@ -30,7 +48,11 @@ class Subscription:
 
 @dataclass
 class Event:
-    """An event (document) to be matched against subscriptions."""
+    """An event (document/notification) to be routed to matching subscriptions.
+
+    Maps to an element of the event stream M (Definition 2 in the paper).
+    ``ground_truth`` holds the oracle matching subscription IDs for evaluation.
+    """
     id: str
     text: str
     ground_truth: list[str]  # list of matching subscription IDs
@@ -38,7 +60,11 @@ class Event:
 
 @dataclass
 class Dataset:
-    """A loaded dataset ready for Neural Router evaluation."""
+    """A loaded dataset ready for Neural Router evaluation.
+
+    Bundles events and subscriptions together with descriptive metadata.
+    Provides summary statistics used in Table 1 of the paper.
+    """
     name: str
     short_name: str  # D1, D2, D3
     events: list[Event]
@@ -80,7 +106,21 @@ def load_dataset_by_name(
     cache_dir: Optional[str] = None,
     max_events: Optional[int] = None,
 ) -> Dataset:
-    """Load a dataset by name (D1/cardiffnlp, D2/eurlex, D3/mnds)."""
+    """Load a dataset by short name or alias.
+
+    Args:
+        name: Dataset identifier. Accepts short names (D1, D2, D3) or
+            aliases (cardiffnlp, eurlex, mnds).
+        cache_dir: Directory for HuggingFace / Zenodo caches.
+        max_events: If set, randomly subsample to this many events
+            (deterministic, seed=42).
+
+    Returns:
+        A fully populated Dataset instance.
+
+    Raises:
+        ValueError: If `name` does not match any known dataset.
+    """
     name_lower = name.lower().strip()
     if name_lower in ("d1", "cardiffnlp", "tweet_topic"):
         return load_cardiffnlp(cache_dir=cache_dir, max_events=max_events)
@@ -124,13 +164,22 @@ def load_cardiffnlp(
     cache_dir: Optional[str] = None,
     max_events: Optional[int] = None,
 ) -> Dataset:
-    """Load CardiffNLP Tweet Topic multi-label dataset from HuggingFace."""
+    """Load D1: CardiffNLP Tweet Topic multi-label dataset from HuggingFace.
+
+    Args:
+        cache_dir: HuggingFace cache directory.
+        max_events: Cap on number of events (deterministic subsample).
+
+    Returns:
+        Dataset with 19 subscriptions and multi-label events.
+    """
     from datasets import load_dataset as hf_load
 
     logger.info("Loading CardiffNLP Tweet Topic dataset...")
     ds = hf_load("cardiffnlp/tweet_topic_multi", cache_dir=cache_dir)
 
-    # Combine train and test splits
+    # Combine train and test splits (the dataset uses _coling2022 suffixes
+    # for split names, but some versions drop the suffix)
     all_examples = []
     for split_name in ["train_coling2022", "test_coling2022"]:
         if split_name in ds:
@@ -138,7 +187,7 @@ def load_cardiffnlp(
         elif split_name.replace("_coling2022", "") in ds:
             all_examples.extend(ds[split_name.replace("_coling2022", "")])
 
-    # If splits have different names, try standard ones
+    # Fallback: iterate all available splits if named splits were not found
     if not all_examples:
         for split_name in ds.keys():
             all_examples.extend(ds[split_name])
@@ -194,15 +243,23 @@ def load_eurlex(
     max_events: Optional[int] = None,
     label_level: str = "level_2",
 ) -> Dataset:
-    """Load MultiEURLEX dataset from HuggingFace with EUROVOC level-2 labels.
+    """Load D2: MultiEURLEX dataset from HuggingFace with EUROVOC level-2 labels.
 
-    Note: The EUROVOC concept IDs need to be mapped to textual descriptions.
-    We fetch descriptors from the EUROVOC thesaurus or use the dataset's
-    built-in label names if available.
+    The EUROVOC concept IDs are numeric; human-readable descriptions come from
+    ``data/eurovoc_labels.csv`` (generated by ``scripts/fetch_eurovoc.py``).
+    Documents longer than 2000 words are truncated to control LLM token costs.
 
-    The nlpaueb/multi_eurlex dataset uses a custom loading script that is
-    no longer supported by newer versions of the datasets library. We use
-    trust_remote_code=True to allow it, or fall back to the raw parquet files.
+    Args:
+        cache_dir: HuggingFace cache directory.
+        max_events: Cap on number of events (deterministic subsample).
+        label_level: EUROVOC hierarchy level (default "level_2", 127 labels).
+
+    Returns:
+        Dataset with ~127 subscriptions and multi-label events.
+
+    Note:
+        The nlpaueb/multi_eurlex dataset requires ``trust_remote_code=True``
+        because it uses a custom loading script.
     """
     from datasets import load_dataset as hf_load
 
@@ -283,8 +340,15 @@ def _load_eurovoc_descriptions(
 ) -> dict[str, str]:
     """Load EUROVOC concept ID to textual description mapping.
 
-    First tries a local mapping file; if unavailable, returns IDs as-is
-    and logs a warning to create the mapping.
+    Looks for ``<cache_dir>/eurovoc_labels.csv`` (two columns: id, description).
+    If the file is missing, falls back to raw numeric IDs and logs a warning.
+
+    Args:
+        label_ids: List of EUROVOC concept ID strings (e.g., "100163").
+        cache_dir: Directory to search for the CSV mapping file.
+
+    Returns:
+        Dict mapping concept ID strings to human-readable descriptions.
     """
     # Check for local mapping file
     mapping_path = Path(cache_dir or "data") / "eurovoc_labels.csv"
@@ -307,11 +371,19 @@ def load_mnds(
     cache_dir: Optional[str] = None,
     max_events: Optional[int] = None,
 ) -> Dataset:
-    """Load MN-DS dataset from local CSV or download from Zenodo.
+    """Load D3: MN-DS (Multilabeled News) dataset from local CSV or Zenodo.
 
-    Note: MN-DS is single-label at level-2 (each article has one IPTC
-    Media Topic at level-2). The paper's term 'multilabeled' refers to
-    hierarchical labeling (level-1 + level-2), not multiple level-2 labels.
+    MN-DS is single-label at level-2: each article maps to exactly one IPTC
+    Media Topic at level-2. The original paper's term "multilabeled" refers
+    to hierarchical labeling (level-1 + level-2), not multiple level-2 labels.
+
+    Args:
+        cache_dir: Directory containing (or to download to)
+            ``MN-DS-news-classification.csv``.
+        max_events: Cap on number of events (deterministic subsample).
+
+    Returns:
+        Dataset with ~109 subscriptions and single-label events.
     """
     data_dir = Path(cache_dir or "data")
     csv_path = data_dir / "MN-DS-news-classification.csv"
@@ -377,7 +449,7 @@ def load_mnds(
 
 
 def _download_mnds(output_path: Path) -> None:
-    """Download MN-DS CSV from Zenodo."""
+    """Download MN-DS CSV from Zenodo (record 7394851)."""
     import urllib.request
 
     url = "https://zenodo.org/api/records/7394851/files/MN-DS-news-classification.csv/content"

@@ -1,8 +1,14 @@
 #!/usr/bin/env python3
-"""Download and verify all three datasets.
+"""Download and verify all three benchmark datasets (D1, D2, D3).
+
+Downloads datasets via HuggingFace (D1, D2) and Zenodo (D3) into the cache
+directory, then prints a summary of each (event count, subscription count,
+label statistics). Use this script to pre-populate the data cache before
+running experiments.
 
 Usage:
     python scripts/fetch_datasets.py [--cache-dir data]
+    python scripts/fetch_datasets.py --max-events 100  # quick verification
 """
 
 import argparse

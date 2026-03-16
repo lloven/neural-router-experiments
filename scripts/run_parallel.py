@@ -1,8 +1,13 @@
 #!/usr/bin/env python3
-"""Parallel experiment runner for Neural Router.
+"""Parallel experiment runner for the Neural Router.
 
-Runs multiple experiment configurations in parallel using multiprocessing.
-Each (config, dataset, seed) triple is an independent job.
+Uses Python's ``ProcessPoolExecutor`` to run multiple experiment jobs
+concurrently. Each (config, dataset, seed) triple or (baseline, dataset) pair
+is an independent job that loads its own models in-process (avoiding pickling
+issues with PyTorch models).
+
+Progress is tracked in ``results/.progress.json`` so that long runs can be
+monitored externally.
 
 Usage:
     # Run full ablation on D1 with all seeds, 4 parallel workers
@@ -47,7 +52,13 @@ PROGRESS_FILE = "results/.progress.json"
 
 
 def update_progress(job_id: str, status: str, detail: str = ""):
-    """Update the shared progress file."""
+    """Update the shared JSON progress file (results/.progress.json).
+
+    Args:
+        job_id: Unique job identifier (e.g., "A3_D1_s42").
+        status: One of "queued", "running", "done", "failed".
+        detail: Optional extra info (e.g., F1 score or error message).
+    """
     progress_path = Path(PROGRESS_FILE)
     progress_path.parent.mkdir(parents=True, exist_ok=True)
 
@@ -71,9 +82,18 @@ def update_progress(job_id: str, status: str, detail: str = ""):
 
 
 def run_single_job(job: dict) -> dict:
-    """Run a single experiment job (config/dataset/seed or baseline/dataset).
+    """Run a single experiment job in a worker process.
 
-    This function runs in a separate process.
+    Each job is self-contained: it loads the dataset, initializes models,
+    runs the pipeline, evaluates, and returns a result dict. Imports are
+    done inside the function to avoid pickling issues across process boundaries.
+
+    Args:
+        job: Dict with keys "type" ("ablation" or "baseline"), "dataset",
+            "config"/"baseline", "seed", and hyperparameter overrides.
+
+    Returns:
+        Dict suitable for a pandas DataFrame row, or an error dict.
     """
     from src.data import load_dataset_by_name
     from src.router import NeuralRouter, RouterConfig, ABLATION_CONFIGS
@@ -175,6 +195,8 @@ def parse_args():
     parser.add_argument("--workers", type=int, default=4)
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--output-dir", type=str, default="results")
+    parser.add_argument("--output-tag", type=str, default=None,
+                        help="Deterministic output prefix (overrides timestamp). For DVC.")
     parser.add_argument("--cache-dir", type=str, default="data")
     return parser.parse_args()
 
@@ -259,10 +281,15 @@ def main():
     if results:
         output_dir = Path(args.output_dir)
         output_dir.mkdir(parents=True, exist_ok=True)
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+
+        if args.output_tag:
+            prefix = args.output_tag
+        else:
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            prefix = f"parallel_{timestamp}"
 
         df = pd.DataFrame(results)
-        csv_path = output_dir / f"parallel_{timestamp}_results.csv"
+        csv_path = output_dir / f"{prefix}_results.csv"
         df.to_csv(csv_path, index=False)
         logger.info(f"Saved to {csv_path}")
 

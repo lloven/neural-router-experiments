@@ -1,9 +1,26 @@
 """Neural Router: core matching engine.
 
-Implements the three algorithms from the paper:
-  1. OptimizeSubscriptions (offline): cluster + compress subscriptions
-  2. MatchEvents (online): assign events to clusters + LLM matching
-  3. CoverAndMerge: LLM-assisted subscription compression
+Implements the three algorithms from the paper (Section 3):
+
+  Algorithm 1 -- OptimizeSubscriptions (offline phase, Section 3.2):
+      Embed subscriptions, cluster via k-means, and compress each cluster
+      with CoverAndMerge. Produces an optimised subscription index.
+
+  Algorithm 2 -- MatchEvents (online phase, Section 3.3):
+      Embed incoming events, assign them to clusters via cosine pre-filter
+      (threshold tau), and invoke the LLM for semantic matching within
+      each cluster.
+
+  Algorithm 3 -- CoverAndMerge (Section 3.2):
+      LLM-assisted iterative compression that identifies subsumption
+      (covering) pairs and mergeable subscriptions to reduce prompt size.
+
+Key classes:
+  RouterConfig  -- full configuration (ablation toggles + hyperparameters)
+  NeuralRouter  -- stateful engine that runs the offline/online pipeline
+  Cluster       -- a group of subscriptions with shared centroid
+  MatchResult   -- per-event list of matched subscription IDs
+  RouterStats   -- timing, token, and invocation counters
 """
 
 from __future__ import annotations
@@ -32,13 +49,18 @@ logger = logging.getLogger(__name__)
 
 @dataclass
 class Cluster:
-    """A subscription cluster with compressed subscriptions and centroid."""
+    """A subscription cluster produced by k-means during the offline phase.
+
+    Each cluster holds its original subscriptions, an optional compressed
+    version (after CoverAndMerge), and a centroid embedding used for the
+    cosine pre-filter during event assignment.
+    """
     id: int
-    subscriptions: list[Subscription]          # original subscriptions
-    compressed: Optional[list[Subscription]] = None  # after C&M
-    centroid: Optional[np.ndarray] = None
-    llm: Optional[str] = None
-    queue: list[Event] = field(default_factory=list)  # events assigned to this cluster
+    subscriptions: list[Subscription]          # original subscriptions in this cluster
+    compressed: Optional[list[Subscription]] = None  # after CoverAndMerge (Algorithm 3)
+    centroid: Optional[np.ndarray] = None       # mean embedding of member subscriptions
+    llm: Optional[str] = None                   # LLM model assigned to this cluster
+    queue: list[Event] = field(default_factory=list)  # events routed here during matching
 
     @property
     def active_subscriptions(self) -> list[Subscription]:
@@ -47,7 +69,7 @@ class Cluster:
 
     @property
     def compression_ratio(self) -> float:
-        """ρ_c = |S'| / |S|"""
+        """Per-cluster compression ratio: rho_c = |S'_c| / |S_c| (Eq. 3)."""
         if self.compressed is None:
             return 1.0
         return len(self.compressed) / max(len(self.subscriptions), 1)
@@ -55,7 +77,11 @@ class Cluster:
 
 @dataclass
 class MatchResult:
-    """Result of matching a single event."""
+    """Result of matching a single event against the subscription set.
+
+    Contains the ordered list of subscription IDs the LLM deemed relevant,
+    optionally accompanied by relevance scores.
+    """
     event_id: str
     matched_subscription_ids: list[str]
     scores: Optional[list[float]] = None  # relevance scores if available
@@ -63,7 +89,11 @@ class MatchResult:
 
 @dataclass
 class RouterStats:
-    """Statistics from a routing run."""
+    """Timing, token, and invocation statistics from a routing run.
+
+    Tracks both the offline phase (embedding, clustering, CoverAndMerge)
+    and the online phase (cosine filter, LLM inference, post-processing).
+    """
     num_events: int = 0
     num_subscriptions: int = 0
     num_clusters: int = 0
@@ -86,7 +116,19 @@ class RouterStats:
 
 @dataclass
 class RouterConfig:
-    """Configuration for a Neural Router run (corresponds to an ablation config)."""
+    """Configuration for a Neural Router run.
+
+    Each ablation variant (A0-A6, Table 2 in the paper) is a specific
+    combination of the boolean component toggles below. Parameter defaults
+    correspond to the full pipeline (A3).
+
+    Attributes:
+        use_clustering: Enable k-means subscription clustering (Algorithm 1).
+        use_cover_merge: Enable CoverAndMerge compression (Algorithm 3).
+        use_reunite: After C&M, merge all clusters back into one (A4 variant).
+        use_event_clustering: Cluster events before matching (A5 variant).
+        use_cosine_filter: Pre-filter events by cosine threshold tau.
+    """
     # Components (ablation toggles)
     use_clustering: bool = True       # cluster subscriptions
     use_cover_merge: bool = True      # compress via C&M
@@ -94,11 +136,11 @@ class RouterConfig:
     use_event_clustering: bool = False  # cluster events before matching
     use_cosine_filter: bool = True    # pre-filter events by cosine threshold
 
-    # Parameters
-    k: int = 19                       # number of subscription clusters
-    tau: float = 0.3                  # cosine similarity threshold
-    kappa: int = 3                    # top-K matches
-    adaptive_kappa: bool = False      # let LLM decide match count
+    # Core hyperparameters (Section 4.3)
+    k: int = 19                       # number of subscription clusters (k in the paper)
+    tau: float = 0.3                  # cosine similarity threshold (tau in the paper)
+    kappa: int = 3                    # top-kappa matches returned per event
+    adaptive_kappa: bool = False      # let LLM decide match count dynamically
 
     # Event clustering
     k_events: int = 5                 # number of event clusters (if enabled)
@@ -106,12 +148,12 @@ class RouterConfig:
     # Cover/Merge
     cm_max_iterations: int = 10
 
-    # LLM
+    # LLM settings (used in the cost model, Eq. 4)
     llm_model: str = "gpt-4o-mini"
     llm_temperature: float = 0.0
-    context_window: int = 128000
-    t_inst: int = 200
-    t_resp: int = 500
+    context_window: int = 128000      # W: context window size in tokens
+    t_inst: int = 200                 # t_inst: instruction overhead in tokens
+    t_resp: int = 500                 # t_resp: reserved response budget in tokens
 
     # Embedding
     embedding_model: str = "all-MiniLM-L6-v2"
@@ -125,7 +167,7 @@ class RouterConfig:
 
     @property
     def config_name(self) -> str:
-        """Return a short descriptive name."""
+        """Return a short descriptive name matching the ablation table (A0-A6)."""
         if not self.use_clustering and not self.use_cover_merge:
             return "A0_raw_llm"
         elif self.use_clustering and not self.use_cover_merge:
@@ -142,7 +184,14 @@ class RouterConfig:
             return "A3_clust_cm"
 
 
-# Predefined ablation configurations
+# Predefined ablation configurations (Table 2 in the paper):
+#   A0: Raw LLM baseline (no clustering, no C&M, no cosine filter)
+#   A1: Clustering only (+ cosine filter, no C&M)
+#   A2: CoverAndMerge only (no clustering, no cosine filter)
+#   A3: Full pipeline (clustering + C&M + cosine filter)
+#   A4: Full + reunite (merge clusters back after C&M)
+#   A5: Full + event clustering
+#   A6: Full but no cosine filter (tau=0 equivalent)
 ABLATION_CONFIGS = {
     "A0": RouterConfig(
         use_clustering=False, use_cover_merge=False,
@@ -180,7 +229,17 @@ ABLATION_CONFIGS = {
 # ---------------------------------------------------------------------------
 
 class NeuralRouter:
-    """Neural Router matching engine."""
+    """Neural Router matching engine (Algorithms 1-3).
+
+    Orchestrates the offline phase (optimize_subscriptions) and online phase
+    (match_events). Maintains stateful cluster assignments and cumulative
+    statistics across calls.
+
+    Args:
+        config: Full router configuration (ablation toggles + hyperparameters).
+        llm_client: LLM client for semantic matching and CoverAndMerge.
+        embedding_model: Sentence-transformer for encoding texts to embeddings.
+    """
 
     def __init__(
         self,
@@ -199,13 +258,20 @@ class NeuralRouter:
     # -------------------------------------------------------------------
 
     def optimize_subscriptions(self, subscriptions: list[Subscription]) -> list[Cluster]:
-        """Cluster and compress subscriptions (offline phase).
+        """Cluster and compress subscriptions (offline phase, Algorithm 1).
 
-        Algorithm 1 from the paper:
-        1. Embed all subscriptions
-        2. K-means clustering (if enabled)
-        3. CoverAndMerge per cluster (if enabled)
-        4. Optionally reunite clusters
+        Steps (Section 3.2):
+          1. Embed all subscription descriptions with the sentence-transformer.
+          2. K-means clustering into k groups (if use_clustering is True).
+          3. CoverAndMerge per cluster to compress subscriptions (if use_cover_merge).
+          4. Optionally reunite all clusters into one (A4 variant).
+
+        Args:
+            subscriptions: The full subscription set S.
+
+        Returns:
+            List of Cluster objects with centroid, original, and (optionally)
+            compressed subscriptions.
         """
         self.stats.num_subscriptions = len(subscriptions)
         t0 = time.time()
@@ -290,11 +356,24 @@ class NeuralRouter:
     # -------------------------------------------------------------------
 
     def match_events(self, events: list[Event]) -> list[MatchResult]:
-        """Match events to subscriptions via cluster assignment + LLM.
+        """Match events to subscriptions (online phase, Algorithm 2).
 
-        Algorithm 2 from the paper:
-        1. Embed events and assign to clusters by cosine similarity
-        2. For each cluster, batch events and invoke LLM
+        Steps (Section 3.3):
+          1. Embed all event texts.
+          2. Assign each event to clusters whose centroid similarity >= tau
+             (cosine pre-filter). Falls back to nearest cluster if no threshold
+             is met.
+          3. For each cluster, batch its queued events and invoke the LLM.
+          4. Deduplicate and trim results to top-kappa per event.
+
+        Args:
+            events: The event stream M to be matched.
+
+        Returns:
+            One MatchResult per event, in the same order as the input list.
+
+        Raises:
+            RuntimeError: If optimize_subscriptions() has not been called.
         """
         self.stats.num_events = len(events)
         t0 = time.time()
@@ -380,13 +459,21 @@ class NeuralRouter:
     # -------------------------------------------------------------------
 
     def _cover_and_merge(self, subscriptions: list[Subscription]) -> list[Subscription]:
-        """LLM-assisted subscription compression (Algorithm 3).
+        """LLM-assisted subscription compression (Algorithm 3, Section 3.2).
 
         Iteratively asks the LLM to identify:
-        - Covering pairs: s_i subsumes s_j -> remove s_j
-        - Merge candidates: s_i, s_j -> combined subscription
+          - Covering pairs: s_i semantically subsumes s_j, so s_j is removed.
+          - Merge candidates: s_i and s_j are combined into a new, broader
+            subscription with a concatenated identifier (e.g., "id1+id2").
 
-        Repeats until fixed point (no changes) or max iterations.
+        Converges when the LLM returns no further operations or cm_max_iterations
+        is reached.
+
+        Args:
+            subscriptions: Subscriptions within a single cluster to compress.
+
+        Returns:
+            Compressed subscription list (may be shorter than input).
         """
         current = list(subscriptions)
 
@@ -448,18 +535,28 @@ class NeuralRouter:
     # -------------------------------------------------------------------
 
     def _match_cluster(self, cluster: Cluster) -> list[MatchResult]:
-        """Match all events in a cluster's queue against its subscriptions."""
+        """Match all events in a cluster's queue against its subscriptions.
+
+        Automatically batches events to fit within the LLM's context window,
+        using the cost model formula (Eq. 4) to determine batch size.
+
+        Args:
+            cluster: Cluster with a non-empty event queue.
+
+        Returns:
+            One MatchResult per queued event.
+        """
         subs = cluster.active_subscriptions
         events = cluster.queue
         results = []
 
-        # Compute batch size based on context window
+        # Compute batch size from the cost model (Eq. 4):
+        #   b_max = floor((W - t_inst - |S_c| * t_s - t_resp) / t_e)
         avg_sub_tokens = self._estimate_tokens(
             "\n".join(f"- [{s.id}] {s.description}" for s in subs)
         ) / max(len(subs), 1) * len(subs)
-        avg_event_tokens = 50  # rough estimate, refined per-event
+        avg_event_tokens = 50  # rough per-event token estimate
 
-        # Estimate max batch size
         available = self.config.context_window - self.config.t_inst - avg_sub_tokens - self.config.t_resp
         if available <= 0:
             # Subscriptions alone exceed window; match one event at a time
@@ -508,7 +605,12 @@ class NeuralRouter:
         """Run LLM matching with async parallelism via asyncio.
 
         Builds all prompts upfront across all clusters, fires them
-        concurrently with a semaphore, then parses and merges results.
+        concurrently (bounded by max_parallel semaphore), then parses
+        and merges results. Falls back to a thread-pool if an event loop
+        is already running (e.g., inside Jupyter).
+
+        Returns:
+            Dict mapping event_id to its aggregated MatchResult.
         """
         try:
             loop = asyncio.get_event_loop()
@@ -630,7 +732,19 @@ class NeuralRouter:
         subscriptions: list[Subscription],
         events: list[Event],
     ) -> str:
-        """Build the event matching prompt (Listing 2 from the paper)."""
+        """Build the event matching prompt (Listing 2 from the paper).
+
+        The prompt instructs the LLM to evaluate every (event, subscription)
+        pair semantically, rank matches by relevance, and return a JSON dict
+        mapping event IDs to lists of matched subscription IDs.
+
+        Args:
+            subscriptions: Active (possibly compressed) subscriptions for this cluster.
+            events: Batch of events to match in a single LLM call.
+
+        Returns:
+            Complete prompt string ready for LLM invocation.
+        """
         sub_text = "\n".join(
             f"- [{s.id}] {s.description}" for s in subscriptions
         )
@@ -672,7 +786,17 @@ Example: {{"event_1": ["sub_a", "sub_b"], "event_2": ["sub_c"]}}
 Only return the JSON, no other text."""
 
     def _build_cover_merge_prompt(self, subscriptions: list[Subscription]) -> str:
-        """Build the cover/merge prompt (Listing 1 from the paper)."""
+        """Build the CoverAndMerge prompt (Listing 1 from the paper).
+
+        Instructs the LLM to identify subsumption pairs and merge candidates,
+        returning structured JSON with "covers" and "merges" keys.
+
+        Args:
+            subscriptions: Current subscription set within one cluster.
+
+        Returns:
+            Complete prompt string ready for LLM invocation.
+        """
         sub_text = "\n".join(
             f"- [{s.id}] {s.description}" for s in subscriptions
         )
@@ -706,7 +830,20 @@ Only return the JSON, no other text."""
     def _parse_match_response(
         self, response_text: str, events: list[Event],
     ) -> list[MatchResult]:
-        """Parse the LLM's JSON response for event matching."""
+        """Parse the LLM's JSON response for event matching.
+
+        Handles markdown code fences, nested lists, and missing event keys.
+
+        Args:
+            response_text: Raw LLM output (expected: JSON dict).
+            events: The event batch that was sent in the prompt.
+
+        Returns:
+            One MatchResult per event in the batch.
+
+        Raises:
+            json.JSONDecodeError: If the response is not valid JSON.
+        """
         # Try to extract JSON from response
         text = response_text.strip()
         if text.startswith("```"):
@@ -739,7 +876,16 @@ Only return the JSON, no other text."""
     def _parse_cover_merge_response(
         self, response_text: str, subscriptions: list[Subscription],
     ) -> dict[str, list]:
-        """Parse the LLM's JSON response for cover/merge operations."""
+        """Parse the LLM's JSON response for CoverAndMerge operations.
+
+        Args:
+            response_text: Raw LLM output (expected: JSON with "covers" and "merges").
+            subscriptions: Current subscriptions (for validation context).
+
+        Returns:
+            Dict with "covers" (list of (parent, child) tuples) and
+            "merges" (list of (id1, id2, description) triples).
+        """
         text = response_text.strip()
         if text.startswith("```"):
             lines = text.split("\n")
@@ -768,7 +914,14 @@ Only return the JSON, no other text."""
     # -------------------------------------------------------------------
 
     def predict_invocations(self) -> int:
-        """Predict total LLM invocations using the cost model (Eq. 4)."""
+        """Predict total LLM invocations using the cost model (Eq. 4).
+
+        I = sum_c ceil(|M_c| / b_max_c), where b_max_c is the max batch
+        size for cluster c given the context window budget.
+
+        Returns:
+            Estimated total number of LLM calls for the current cluster state.
+        """
         if not self.clusters:
             return 0
 
@@ -778,6 +931,7 @@ Only return the JSON, no other text."""
             avg_t_s = 80  # tokens per subscription (estimate)
             avg_t_e = 50  # tokens per event (estimate)
 
+            # b_max = floor((W - t_inst - |S'_c| * t_s - t_resp) / t_e)
             b_max = max(1, (
                 self.config.context_window
                 - self.config.t_inst
@@ -786,7 +940,7 @@ Only return the JSON, no other text."""
             ) // avg_t_e)
 
             m_c = len(cluster.queue)
-            i_c = (m_c + b_max - 1) // b_max  # ceiling division
+            i_c = (m_c + b_max - 1) // b_max  # ceil(|M_c| / b_max)
             total += i_c
 
         return total
@@ -794,10 +948,16 @@ Only return the JSON, no other text."""
     def predict_latency(self, t_llm: float = 0.2) -> float:
         """Predict end-to-end latency using the cost model (Eq. 5).
 
+        L = ceil(I / P) * t_llm, where I is total invocations and P is the
+        parallelism degree.
+
         Args:
-            t_llm: mean wall-clock time per LLM invocation (seconds)
+            t_llm: Mean wall-clock time per LLM invocation in seconds.
+
+        Returns:
+            Estimated wall-clock latency in seconds.
         """
         I = self.predict_invocations()
         P = self.config.max_parallel
-        R = (I + P - 1) // P  # ceiling division
+        R = (I + P - 1) // P  # ceil(I / P): number of sequential rounds
         return R * t_llm

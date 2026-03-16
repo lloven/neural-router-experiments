@@ -24,6 +24,7 @@ seaborn>=0.13.0
 # Config & experiment management
 pyyaml>=6.0
 tqdm>=4.66.0
+dvc>=3.50.0            # Pipeline orchestration and caching
 
 # Utilities
 python-dotenv>=1.0.0   # For API keys (.env file)
