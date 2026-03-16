@@ -1,0 +1,40 @@
+# Neural Router experiment defaults
+# These match the paper's A3 configuration defaults
+
+# LLM settings
+llm:
+  model: "gpt-4o-mini"
+  context_window: 128000  # GPT-4o-mini context window (tokens)
+  t_inst: 200             # instruction template tokens
+  t_resp: 500             # response budget tokens
+  max_parallel: 10        # parallel LLM instances (P)
+  temperature: 0.0        # deterministic output
+
+# Embedding settings
+embedding:
+  model: "all-MiniLM-L6-v2"
+
+# Clustering settings
+clustering:
+  k: 19                   # number of subscription clusters
+  tau: 0.3                # cosine similarity threshold for event assignment
+  random_seeds: [42, 123, 456, 789, 1024]  # 5 seeds for k-means
+
+# Matching settings
+matching:
+  kappa: 3                # top-K matches per event
+  adaptive: false         # if true, LLM decides how many matches
+
+# Cover/Merge settings
+cover_merge:
+  max_iterations: 10      # max C&M rounds before forced stop
+
+# Evaluation
+evaluation:
+  metrics: ["precision", "recall", "f1", "fpr"]
+  confidence_level: 0.95  # for CI computation
+  significance_alpha: 0.05  # Wilcoxon signed-rank test
+
+# Dataset paths (relative to Experiments/neural-router/)
+datasets:
+  cache_dir: "data/"

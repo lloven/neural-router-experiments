@@ -1,0 +1,21 @@
+# Python
+.venv/
+__pycache__/
+*.pyc
+*.egg-info/
+
+# Data (large files, downloaded on demand)
+data/
+!data/.gitkeep
+
+# Results (generated, large)
+results/
+
+# Generated figures
+figs/
+
+# Environment
+.env
+
+# OS
+.DS_Store
