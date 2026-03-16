@@ -3,6 +3,12 @@
 Uses asyncio + litellm's async API to run multiple LLM invocations
 concurrently, dramatically reducing wall-clock time when matching
 events across multiple clusters.
+
+The concurrency degree is bounded by a semaphore (max_concurrent) to
+stay within provider rate limits. This module is complementary to the
+inline async path in ``router.py._run_async_matching()``, which uses
+litellm directly; AsyncLLMClient provides a standalone reusable client
+with its own usage tracking.
 """
 
 from __future__ import annotations
@@ -19,7 +25,19 @@ logger = logging.getLogger(__name__)
 
 
 class AsyncLLMClient:
-    """Async LLM client using litellm's async completion."""
+    """Async LLM client using litellm's async completion.
+
+    Provides both async (``invoke_async``, ``invoke_batch_async``) and sync
+    (``invoke_batch_sync``) interfaces, all backed by asyncio concurrency.
+
+    Args:
+        model: LiteLLM model identifier.
+        temperature: Sampling temperature (0.0 for deterministic).
+        max_tokens: Maximum tokens in the generated completion.
+        api_key: Optional API key override.
+        max_concurrent: Maximum number of concurrent LLM calls (semaphore bound).
+        rate_limit_rpm: Informational rate limit (not enforced in code yet).
+    """
 
     def __init__(
         self,
@@ -43,7 +61,16 @@ class AsyncLLMClient:
         self._total_latency = 0.0
 
     async def invoke_async(self, prompt: str) -> LLMResponse:
-        """Invoke the LLM asynchronously."""
+        """Invoke the LLM asynchronously (single prompt).
+
+        Acquires the concurrency semaphore before calling the API.
+
+        Args:
+            prompt: The user-message content to send.
+
+        Returns:
+            An LLMResponse with the completion text and usage metadata.
+        """
         import litellm
 
         if self._semaphore is None:
@@ -84,9 +111,16 @@ class AsyncLLMClient:
                 raise
 
     async def invoke_batch_async(self, prompts: list[str]) -> list[LLMResponse]:
-        """Invoke multiple prompts concurrently.
+        """Invoke multiple prompts concurrently via asyncio.gather.
 
         Respects the max_concurrent semaphore to avoid rate limiting.
+        Failed calls are returned as exceptions in the result list.
+
+        Args:
+            prompts: List of prompt strings to invoke in parallel.
+
+        Returns:
+            List of LLMResponse objects (or BaseException for failed calls).
         """
         tasks = [self.invoke_async(p) for p in prompts]
         return await asyncio.gather(*tasks, return_exceptions=True)
@@ -94,7 +128,15 @@ class AsyncLLMClient:
     def invoke_batch_sync(self, prompts: list[str]) -> list[LLMResponse]:
         """Synchronous wrapper for batch invocation.
 
-        Creates or reuses an event loop to run async calls.
+        Creates or reuses an event loop to run async calls. If an event loop
+        is already running (e.g., inside Jupyter), falls back to executing
+        in a separate thread via ThreadPoolExecutor.
+
+        Args:
+            prompts: List of prompt strings to invoke in parallel.
+
+        Returns:
+            List of LLMResponse objects (or BaseException for failed calls).
         """
         try:
             loop = asyncio.get_event_loop()
@@ -115,6 +157,7 @@ class AsyncLLMClient:
 
     @property
     def total_cost(self) -> float:
+        """Estimate cumulative cost (GPT-4o-mini pricing, March 2026)."""
         input_cost = self._total_prompt_tokens * 0.15 / 1_000_000
         output_cost = self._total_response_tokens * 0.60 / 1_000_000
         return input_cost + output_cost

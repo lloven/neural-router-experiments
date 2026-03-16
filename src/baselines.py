@@ -1,12 +1,17 @@
-"""Baseline matching methods for comparison with the Neural Router.
+"""Baseline matching methods for comparison with the Neural Router (Section 4.4).
 
-Six baselines:
-  1. BM25 (keyword matching)
-  2. Sentence-BERT cosine similarity
-  3. Cross-encoder reranker
-  4. GloVe cosine similarity
-  5. TF-IDF cosine similarity
-  6. Word2Vec cosine similarity
+Six non-LLM baselines that match events to subscriptions using different
+text similarity approaches. These serve as reference points in the ablation
+study (Table 3 in the paper):
+
+  1. BM25          -- sparse keyword matching (rank_bm25 library)
+  2. Sentence-BERT -- dense cosine similarity (same model as Neural Router)
+  3. Cross-encoder -- pairwise reranker (ms-marco-MiniLM-L-6-v2)
+  4. TF-IDF        -- sparse bag-of-words cosine similarity
+  5. GloVe         -- average word-vector cosine similarity (100d)
+  6. Word2Vec      -- average word-vector cosine similarity (300d)
+
+All baselines return the top-kappa subscriptions per event.
 """
 
 from __future__ import annotations
@@ -28,7 +33,13 @@ logger = logging.getLogger(__name__)
 
 @dataclass
 class BaselineResult:
-    """Result from a baseline method."""
+    """Result from a baseline method.
+
+    Attributes:
+        method: Baseline identifier (e.g., "bm25", "sbert").
+        matches: One MatchResult per event.
+        latency_s: Wall-clock time for the entire matching run.
+    """
     method: str
     matches: list[MatchResult]
     latency_s: float
@@ -39,7 +50,20 @@ def run_baseline(
     dataset: Dataset,
     kappa: int = 3,
 ) -> BaselineResult:
-    """Run a baseline matching method on a dataset."""
+    """Run a baseline matching method on a dataset.
+
+    Args:
+        method: One of "bm25", "sbert", "cross_encoder", "glove", "tfidf",
+            "word2vec".
+        dataset: Loaded dataset with events and subscriptions.
+        kappa: Number of top matches to return per event.
+
+    Returns:
+        BaselineResult with per-event matches and wall-clock latency.
+
+    Raises:
+        ValueError: If `method` is not a recognised baseline name.
+    """
     dispatch = {
         "bm25": _run_bm25,
         "sbert": _run_sbert_cosine,
@@ -64,7 +88,12 @@ def run_baseline(
 # ---------------------------------------------------------------------------
 
 def _run_bm25(dataset: Dataset, kappa: int) -> list[MatchResult]:
-    """BM25 keyword matching."""
+    """BM25 keyword matching (Okapi BM25).
+
+    Tokenises subscription descriptions as the "document corpus" and each
+    event text as a query. Returns top-kappa subscriptions by BM25 score,
+    padding with highest-scoring non-zero entries if fewer than kappa match.
+    """
     from rank_bm25 import BM25Okapi
 
     # Tokenize subscription descriptions
@@ -94,7 +123,11 @@ def _run_bm25(dataset: Dataset, kappa: int) -> list[MatchResult]:
 # ---------------------------------------------------------------------------
 
 def _run_sbert_cosine(dataset: Dataset, kappa: int) -> list[MatchResult]:
-    """Sentence-BERT cosine similarity (same model as Neural Router default)."""
+    """Sentence-BERT cosine similarity using all-MiniLM-L6-v2.
+
+    Uses the same embedding model as the Neural Router's default, but
+    without clustering or LLM matching. Pure embedding-space retrieval.
+    """
     from .embeddings import EmbeddingModel
 
     model = EmbeddingModel("all-MiniLM-L6-v2")
@@ -121,7 +154,12 @@ def _run_sbert_cosine(dataset: Dataset, kappa: int) -> list[MatchResult]:
 # ---------------------------------------------------------------------------
 
 def _run_cross_encoder(dataset: Dataset, kappa: int) -> list[MatchResult]:
-    """Cross-encoder pairwise scoring (ms-marco-MiniLM-L-6-v2)."""
+    """Cross-encoder pairwise scoring (ms-marco-MiniLM-L-6-v2).
+
+    Scores every (event, subscription) pair jointly, making it O(|M| * |S|)
+    in forward passes. More accurate than bi-encoder retrieval but much
+    slower for large subscription sets.
+    """
     from sentence_transformers import CrossEncoder
 
     model = CrossEncoder("cross-encoder/ms-marco-MiniLM-L-6-v2")
@@ -142,7 +180,11 @@ def _run_cross_encoder(dataset: Dataset, kappa: int) -> list[MatchResult]:
 # ---------------------------------------------------------------------------
 
 def _run_tfidf(dataset: Dataset, kappa: int) -> list[MatchResult]:
-    """TF-IDF cosine similarity."""
+    """TF-IDF cosine similarity.
+
+    Fits a joint vocabulary over subscriptions and events, then ranks
+    subscriptions by cosine similarity in the sparse TF-IDF space.
+    """
     sub_texts = [s.description for s in dataset.subscriptions]
     event_texts = [e.text for e in dataset.events]
 
@@ -169,10 +211,11 @@ def _run_tfidf(dataset: Dataset, kappa: int) -> list[MatchResult]:
 # ---------------------------------------------------------------------------
 
 def _run_glove(dataset: Dataset, kappa: int) -> list[MatchResult]:
-    """GloVe average embedding cosine similarity.
+    """GloVe average-word-embedding cosine similarity (100d).
 
-    Uses pre-trained GloVe vectors (via gensim or a local file).
-    Falls back to random embeddings if GloVe is not available.
+    Downloads glove-wiki-gigaword-100 via gensim's API. Falls back to
+    random embeddings if GloVe is unavailable (results will be meaningless
+    but the pipeline will not crash).
     """
     try:
         import gensim.downloader as api
@@ -211,7 +254,11 @@ def _run_glove(dataset: Dataset, kappa: int) -> list[MatchResult]:
 # ---------------------------------------------------------------------------
 
 def _run_word2vec(dataset: Dataset, kappa: int) -> list[MatchResult]:
-    """Word2Vec average embedding cosine similarity."""
+    """Word2Vec average-word-embedding cosine similarity (300d).
+
+    Downloads word2vec-google-news-300 via gensim's API. Falls back to
+    random embeddings if Word2Vec is unavailable.
+    """
     try:
         import gensim.downloader as api
         w2v = api.load("word2vec-google-news-300")
@@ -248,7 +295,19 @@ def _run_word2vec(dataset: Dataset, kappa: int) -> list[MatchResult]:
 # ---------------------------------------------------------------------------
 
 def _avg_word_vectors(text: str, model, dim: int) -> np.ndarray:
-    """Compute average word vector for a text."""
+    """Compute average word vector for a text.
+
+    Words not in the model's vocabulary are silently skipped. If no words
+    are found, returns a zero vector.
+
+    Args:
+        text: Input text string.
+        model: Gensim KeyedVectors model (GloVe or Word2Vec).
+        dim: Embedding dimensionality (must match the model).
+
+    Returns:
+        Mean word vector of shape (dim,), or zeros if no vocabulary overlap.
+    """
     words = text.lower().split()
     vectors = []
     for word in words:

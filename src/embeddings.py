@@ -1,8 +1,13 @@
 """Embedding model abstraction for Neural Router.
 
-Wraps sentence-transformers for subscription/event embedding and
-cosine similarity computation. Supports disk caching to avoid
-recomputation across seeds and runs.
+Wraps sentence-transformers for encoding subscription descriptions and event
+texts into dense vectors used in the offline phase (Algorithm 1) and online
+phase (Algorithm 2). Supports disk caching to `.npy` files keyed by
+(model_name, text_content_hash), so that embeddings are reused when only the
+random seed changes (e.g., across k-means reruns).
+
+The ``EMBEDDING_MODELS`` dict lists the four models compared in the embedding
+sensitivity experiment (Section 4.6).
 """
 
 from __future__ import annotations
@@ -20,10 +25,16 @@ logger = logging.getLogger(__name__)
 class EmbeddingModel:
     """Sentence-transformer embedding model with optional disk caching.
 
-    Caching saves embeddings to `.npy` files keyed by (model_name, text_hash).
-    This avoids recomputing embeddings when only the random seed changes
-    (e.g., across k-means reruns), saving 5-30s per invocation depending
-    on corpus size.
+    Caching saves embeddings to ``.npy`` files keyed by a SHA-256 hash of
+    (model_name, normalization flag, concatenated texts). This avoids
+    recomputing embeddings when only the random seed changes (e.g., across
+    k-means reruns), saving 5-30s per call depending on corpus size.
+
+    Args:
+        model_name: HuggingFace model identifier (e.g., "all-MiniLM-L6-v2").
+        device: Torch device string (None for auto-detect).
+        cache_dir: Parent directory for the embedding cache. A subdirectory
+            ``embedding_cache/`` is created automatically.
     """
 
     def __init__(
@@ -89,7 +100,10 @@ class EmbeddingModel:
         return result
 
     def _cache_key(self, texts: list[str], normalize: bool) -> Optional[str]:
-        """Generate a cache key from model name and text content hash."""
+        """Generate a cache key from model name, normalization flag, and text content.
+
+        Returns None if caching is disabled (no cache_dir).
+        """
         if not self._cache_dir:
             return None
         content = f"{self.model_name}|norm={normalize}|" + "\n".join(texts)
@@ -115,7 +129,7 @@ class EmbeddingModel:
             logger.warning(f"Failed to cache embeddings: {e}")
 
 
-# Models used in the embedding sensitivity experiment
+# Models compared in the embedding sensitivity experiment (Section 4.6, Fig. 6d)
 EMBEDDING_MODELS = {
     "all-MiniLM-L6-v2": "sentence-transformers/all-MiniLM-L6-v2",
     "all-mpnet-base-v2": "sentence-transformers/all-mpnet-base-v2",

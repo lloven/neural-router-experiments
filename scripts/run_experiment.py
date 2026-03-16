@@ -1,5 +1,12 @@
 #!/usr/bin/env python3
-"""Main experiment runner for Neural Router evaluation.
+"""Main experiment runner for the Neural Router evaluation (Section 4).
+
+Orchestrates the full experimental pipeline: loads a dataset, runs ablation
+configurations (A0-A6) and/or baseline methods across multiple random seeds,
+evaluates results, and saves CSV + JSON output.
+
+This is the primary entry point for reproducing the paper's results. For
+parallel execution across multiple processes, see ``run_parallel.py``.
 
 Usage:
     # Run full ablation on D1 (CardiffNLP)
@@ -117,6 +124,10 @@ def parse_args():
         help="Output directory for results"
     )
     parser.add_argument(
+        "--output-tag", type=str, default=None,
+        help="Deterministic output prefix (overrides timestamp). For DVC pipelines."
+    )
+    parser.add_argument(
         "--cache-dir", type=str, default="data",
         help="Cache directory for datasets"
     )
@@ -125,7 +136,17 @@ def parse_args():
 
 
 def get_default_k(dataset: Dataset) -> int:
-    """Get default k value for a dataset (matched to label count)."""
+    """Get default cluster count k for a dataset based on subscription count.
+
+    Heuristic: use k equal to the number of subscriptions for small sets
+    (D1 with 19 topics), and a fixed value for larger sets.
+
+    Args:
+        dataset: Loaded dataset.
+
+    Returns:
+        Default number of clusters.
+    """
     n = dataset.num_subscriptions
     if n <= 20:
         return n  # D1: k=19
@@ -145,7 +166,23 @@ def run_ablation_config(
     tau: float = 0.3,
     kappa: int = 3,
 ) -> EvaluationResult:
-    """Run a single ablation configuration on a dataset with a given seed."""
+    """Run a single ablation configuration on a dataset with a given seed.
+
+    Executes the full offline + online pipeline (Algorithms 1-2) and evaluates.
+
+    Args:
+        config_name: Ablation variant key (e.g., "A3").
+        dataset: Loaded dataset with events and subscriptions.
+        embedding_model: Shared embedding model instance.
+        llm_client: LLM client (real or dry-run).
+        seed: Random seed for k-means.
+        k_override: If set, overrides the default cluster count.
+        tau: Cosine similarity threshold.
+        kappa: Top-kappa matches per event.
+
+    Returns:
+        EvaluationResult with all accuracy and system metrics.
+    """
     config = RouterConfig(**{
         **ABLATION_CONFIGS[config_name].__dict__,
         "seed": seed,
@@ -194,7 +231,16 @@ def run_baselines_on_dataset(
     baselines: list[str],
     kappa: int = 3,
 ) -> list[EvaluationResult]:
-    """Run all specified baselines on a dataset."""
+    """Run all specified baselines on a dataset.
+
+    Args:
+        dataset: Loaded dataset.
+        baselines: List of baseline method names (e.g., ["bm25", "sbert"]).
+        kappa: Top-kappa matches per event.
+
+    Returns:
+        List of EvaluationResults, one per baseline (failed baselines are skipped).
+    """
     results = []
     for method in baselines:
         logger.info(f"Running baseline {method} on {dataset.short_name}")
@@ -220,11 +266,26 @@ def save_results(
     results: list[EvaluationResult],
     output_dir: Path,
     tag: str = "",
+    output_tag: str | None = None,
 ) -> Path:
-    """Save results to CSV and JSON."""
+    """Save results to CSV (summary) and JSON (with CIs and token counts).
+
+    Args:
+        results: List of EvaluationResults to persist.
+        output_dir: Directory to write output files.
+        tag: Descriptive prefix derived from dataset/config names.
+        output_tag: If provided, use as deterministic prefix (for DVC pipelines).
+                    Otherwise, a timestamp-based prefix is generated.
+
+    Returns:
+        Path to the saved CSV file.
+    """
     output_dir.mkdir(parents=True, exist_ok=True)
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    prefix = f"{tag}_{timestamp}" if tag else timestamp
+    if output_tag:
+        prefix = output_tag
+    else:
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        prefix = f"{tag}_{timestamp}" if tag else timestamp
 
     # CSV summary
     rows = [r.summary_row() for r in results]
@@ -330,7 +391,7 @@ def main():
 
     # Save all results
     tag = f"{'_'.join(datasets)}_{'_'.join(configs)}"
-    save_results(all_results, output_dir, tag=tag)
+    save_results(all_results, output_dir, tag=tag, output_tag=args.output_tag)
 
     # Print summary table
     logger.info(f"\n{'='*60}")

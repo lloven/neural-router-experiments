@@ -1,14 +1,15 @@
 #!/usr/bin/env python3
-"""Parameter sensitivity analysis for Neural Router.
+"""Parameter sensitivity analysis for the Neural Router (Section 4.6, Fig. 6).
 
-Runs the Neural Router (A3 config) while sweeping one parameter at a time,
-keeping others at their defaults. Produces CSV results for plotting.
+Runs the full pipeline (A3 config) while sweeping one hyperparameter at a
+time and keeping the others at their default values. Produces per-sweep CSV
+files in the output directory, ready for plotting.
 
-Experiments:
-  1. k sweep: number of subscription clusters (k=1,5,10,15,19,25,30)
-  2. tau sweep: cosine similarity threshold (tau=0.0,0.1,...,0.9)
-  3. kappa sweep: top-K matches per event (kappa=1,2,3,5,7,10)
-  4. embedding model sweep: 4 embedding models
+Sweeps (each corresponds to a panel in Fig. 6):
+  1. k sweep     -- number of subscription clusters: k=1,5,10,15,19,25,30
+  2. tau sweep   -- cosine similarity threshold: tau=0.0,0.1,...,0.9
+  3. kappa sweep -- top-K matches per event: kappa=1,2,3,5,7,10
+  4. embedding   -- four sentence-transformer models
 
 Usage:
     python scripts/run_sensitivity.py --dataset D1 --sweep k
@@ -70,7 +71,21 @@ def run_one(
     seed: int,
     label: str = "",
 ) -> dict:
-    """Run a single configuration and return a result dict."""
+    """Run a single A3 configuration with specified hyperparameters.
+
+    Args:
+        dataset: Loaded dataset.
+        embedder: Embedding model instance.
+        llm_client: LLM client (real or dry-run).
+        k: Number of subscription clusters.
+        tau: Cosine similarity threshold.
+        kappa: Top-kappa matches per event.
+        seed: Random seed for k-means.
+        label: Human-readable label for this data point.
+
+    Returns:
+        Dict with hyperparameters and evaluation metrics (one row).
+    """
     config = RouterConfig(
         **{
             **ABLATION_CONFIGS["A3"].__dict__,
@@ -110,7 +125,7 @@ def run_one(
 
 
 def sweep_k(dataset, embedder, llm_client, seeds, output_dir):
-    """Sweep number of clusters k."""
+    """Sweep number of clusters k (Fig. 6a)."""
     rows = []
     for k in K_VALUES:
         if k > dataset.num_subscriptions:
@@ -133,7 +148,7 @@ def sweep_k(dataset, embedder, llm_client, seeds, output_dir):
 
 
 def sweep_tau(dataset, embedder, llm_client, seeds, output_dir):
-    """Sweep cosine threshold tau."""
+    """Sweep cosine threshold tau (Fig. 6b)."""
     rows = []
     for tau in TAU_VALUES:
         for seed in seeds:
@@ -154,7 +169,7 @@ def sweep_tau(dataset, embedder, llm_client, seeds, output_dir):
 
 
 def sweep_kappa(dataset, embedder, llm_client, seeds, output_dir):
-    """Sweep top-K matches kappa."""
+    """Sweep top-K matches kappa (Fig. 6c)."""
     rows = []
     for kappa in KAPPA_VALUES:
         for seed in seeds:
@@ -175,7 +190,7 @@ def sweep_kappa(dataset, embedder, llm_client, seeds, output_dir):
 
 
 def sweep_embedding(dataset, llm_client, seeds, output_dir, cache_dir):
-    """Sweep embedding models."""
+    """Sweep embedding models (Fig. 6d)."""
     rows = []
     for model_name, model_path in EMBEDDING_MODELS.items():
         logger.info(f"Embedding sweep: {model_name}")

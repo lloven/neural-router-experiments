@@ -1,10 +1,24 @@
-"""Evaluation metrics for Neural Router experiments.
+"""Evaluation metrics and statistical tests for Neural Router experiments.
 
-Metrics (per the paper §4.7):
-  - Matching accuracy: precision, recall, F1, FPR (per-event, macro-averaged)
-  - System: latency, throughput, invocation count
-  - Cost: compression ratio, tokens, monetary cost
-  - Statistical: mean ± 95% CI, Wilcoxon signed-rank test
+Implements the evaluation protocol from Section 4.7 of the paper:
+
+  Matching accuracy (per-event, macro-averaged):
+    - Precision, Recall, F1-score, False Positive Rate (FPR)
+
+  System metrics:
+    - LLM invocation count, wall-clock latency, throughput
+
+  Cost metrics:
+    - Compression ratio (rho), prompt/response tokens, monetary cost per 1k events
+
+  Statistical analysis:
+    - 95% confidence intervals via Student's t-distribution
+    - Wilcoxon signed-rank test for pairwise configuration comparison
+
+Key functions:
+  evaluate_matches()      -- compute all metrics for one (config, dataset, seed)
+  aggregate_seeds()       -- combine per-seed results into cross-seed CIs
+  pairwise_significance() -- Wilcoxon test between two configurations
 """
 
 from __future__ import annotations
@@ -24,7 +38,7 @@ logger = logging.getLogger(__name__)
 
 @dataclass
 class MetricResult:
-    """Aggregated metric result with confidence interval."""
+    """A single metric aggregated over events, with 95% confidence interval."""
     name: str
     mean: float
     ci_lower: float
@@ -42,7 +56,11 @@ class MetricResult:
 
 @dataclass
 class EvaluationResult:
-    """Complete evaluation result for one configuration run."""
+    """Complete evaluation result for one (config, dataset, seed) triple.
+
+    Contains macro-averaged accuracy metrics with CIs, plus system and cost
+    metrics. Use ``summary_row()`` to export as a flat dict for DataFrames.
+    """
     config_name: str
     dataset_name: str
     seed: int
@@ -85,7 +103,18 @@ def evaluate_matches(
     """Evaluate matching results against ground truth.
 
     Computes per-event precision, recall, F1, and FPR, then macro-averages
-    with 95% confidence intervals.
+    with 95% confidence intervals. Handles compound subscription IDs
+    produced by CoverAndMerge (e.g., "arts+music" expands to both).
+
+    Args:
+        matches: One MatchResult per event from the router or baseline.
+        dataset: The dataset (provides ground truth and subscription universe).
+        config_name: Label for this configuration (e.g., "A3").
+        seed: Random seed used for this run.
+        router_stats: Optional RouterStats for system/cost metrics.
+
+    Returns:
+        EvaluationResult with all accuracy, system, and cost metrics.
     """
     # Build ground truth lookup
     gt_lookup = {e.id: set(e.ground_truth) for e in dataset.events}
@@ -102,16 +131,16 @@ def evaluate_matches(
         gt = gt_lookup.get(result.event_id, set())
         predicted = set(result.matched_subscription_ids)
 
-        # Handle compound IDs from cover/merge (e.g., "arts+music" matches both)
+        # Expand compound IDs from CoverAndMerge (e.g., "arts+music" -> {"arts", "music"})
         expanded_predicted = set()
         for pid in predicted:
             if "+" in pid:
-                # Merged subscription: expand to original IDs
                 expanded_predicted.update(pid.split("+"))
             else:
                 expanded_predicted.add(pid)
         predicted = expanded_predicted
 
+        # Standard binary classification metrics per event
         tp = len(predicted & gt)
         fp = len(predicted - gt)
         fn = len(gt - predicted)
@@ -172,15 +201,24 @@ def _compute_ci(
     name: str,
     confidence: float = 0.95,
 ) -> MetricResult:
-    """Compute mean and confidence interval."""
+    """Compute mean and confidence interval via Student's t-distribution.
+
+    Args:
+        values: Per-event (or per-seed) metric values.
+        name: Metric name for the result label.
+        confidence: Confidence level (default 0.95 for 95% CI).
+
+    Returns:
+        MetricResult with mean, CI bounds, std, and sample size.
+    """
     arr = np.array(values)
     n = len(arr)
     mean = float(np.mean(arr))
     std = float(np.std(arr, ddof=1)) if n > 1 else 0.0
 
     if n > 1:
-        se = std / np.sqrt(n)
-        t_val = stats.t.ppf((1 + confidence) / 2, n - 1)
+        se = std / np.sqrt(n)  # standard error of the mean
+        t_val = stats.t.ppf((1 + confidence) / 2, n - 1)  # two-tailed t critical value
         ci_lower = mean - t_val * se
         ci_upper = mean + t_val * se
     else:
@@ -202,8 +240,19 @@ def aggregate_seeds(
 ) -> EvaluationResult:
     """Aggregate results across multiple random seeds.
 
-    Takes a list of per-seed EvaluationResults and produces one
-    result with CIs computed across seeds (not across events).
+    Takes a list of per-seed EvaluationResults and produces one result
+    with CIs computed across seeds (not across events). This is the
+    outer aggregation used for the final reported numbers in the paper.
+
+    Args:
+        results: List of EvaluationResults, one per seed, for the same
+            (config, dataset) pair.
+
+    Returns:
+        A single EvaluationResult with seed=-1 and cross-seed CIs.
+
+    Raises:
+        ValueError: If the input list is empty.
     """
     if not results:
         raise ValueError("No results to aggregate")
@@ -241,7 +290,17 @@ def pairwise_significance(
 ) -> dict:
     """Wilcoxon signed-rank test between two configurations.
 
-    Compares per-seed metric means.
+    Compares per-seed metric means as paired observations. Requires at
+    least 5 seeds for a meaningful test (logs a warning otherwise).
+
+    Args:
+        results_a: Per-seed results for configuration A.
+        results_b: Per-seed results for configuration B (same seeds).
+        metric: Metric attribute name to compare (e.g., "f1", "precision").
+        alpha: Significance threshold (default 0.05).
+
+    Returns:
+        Dict with test statistic, p-value, significance boolean, and metadata.
     """
     vals_a = [getattr(r, metric).mean for r in results_a]
     vals_b = [getattr(r, metric).mean for r in results_b]

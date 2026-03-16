@@ -1,11 +1,16 @@
 #!/usr/bin/env python3
-"""Scaling analysis for Neural Router.
+"""Scaling analysis for the Neural Router (Section 4.5, Fig. 5).
 
-Measures how performance metrics scale with:
-  1. Number of events (|M|): 50, 100, 200, 500, 1000, 2000, 5000
-  2. Number of subscriptions (|S|): varies by dataset (subsample)
+Measures how accuracy and cost metrics scale with corpus size by
+subsampling along two dimensions:
 
-Reports: F1, invocations, latency, cost.
+  1. Event scaling   (|M|): 50, 100, 200, 500, 1000, 2000, 5000 events
+     with fixed subscription set.
+  2. Subscription scaling (|S|): 5, 10, 20, 50, 100, full -- with
+     a fixed 500-event sample. Only meaningful for D2/D3 (many subscriptions).
+
+All runs use the A3 (full pipeline) configuration. Outputs CSV files
+suitable for plotting scaling curves.
 
 Usage:
     python scripts/run_scaling.py --dataset D1 --dimension events
@@ -45,7 +50,20 @@ EVENT_COUNTS = [50, 100, 200, 500, 1000, 2000, 5000]
 
 
 def scale_events(dataset, embedder, llm_client, seed, output_dir):
-    """Scale the number of events while keeping subscriptions fixed."""
+    """Scale the number of events |M| while keeping subscriptions fixed.
+
+    Subsamples events deterministically at each size and runs A3.
+
+    Args:
+        dataset: Full dataset (events are subsampled from this).
+        embedder: Embedding model instance.
+        llm_client: LLM client (real or dry-run).
+        seed: Random seed for subsampling and k-means.
+        output_dir: Directory for CSV output.
+
+    Returns:
+        DataFrame with one row per event count.
+    """
     rows = []
     rng = np.random.RandomState(seed)
 
@@ -110,9 +128,24 @@ def scale_events(dataset, embedder, llm_client, seed, output_dir):
 
 
 def scale_subscriptions(dataset, embedder, llm_client, seed, output_dir):
-    """Scale the number of subscriptions while keeping events fixed.
+    """Scale the number of subscriptions |S| while keeping events fixed.
 
-    Only meaningful for datasets with many subscriptions (D2, D3).
+    Uses a fixed 500-event sample and subsamples subscriptions at each size.
+    Prioritises subscriptions that have at least one matching event to avoid
+    degenerate evaluation scenarios.
+
+    Only meaningful for datasets with many subscriptions (D2, D3); skips
+    datasets with fewer than 20 subscriptions.
+
+    Args:
+        dataset: Full dataset (subscriptions are subsampled from this).
+        embedder: Embedding model instance.
+        llm_client: LLM client (real or dry-run).
+        seed: Random seed for subsampling and k-means.
+        output_dir: Directory for CSV output.
+
+    Returns:
+        DataFrame with one row per subscription count.
     """
     if dataset.num_subscriptions < 20:
         logger.info(f"Skipping subscription scaling for {dataset.short_name} (only {dataset.num_subscriptions} subs)")
