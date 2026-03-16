@@ -1,0 +1,30 @@
+# Neural Router experiment dependencies
+# Python 3.10+
+
+# LLM inference
+litellm>=1.30.0
+openai>=1.12.0
+
+# Embeddings
+sentence-transformers>=2.5.0
+
+# Clustering & ML
+scikit-learn>=1.4.0
+numpy>=1.26.0
+scipy>=1.12.0
+
+# Data handling
+pandas>=2.2.0
+datasets>=2.18.0,<3.0  # HuggingFace datasets; pinned <3.0 for multi_eurlex script compat
+
+# Evaluation & analysis
+matplotlib>=3.8.0
+seaborn>=0.13.0
+
+# Config & experiment management
+pyyaml>=6.0
+tqdm>=4.66.0
+
+# Utilities
+python-dotenv>=1.0.0   # For API keys (.env file)
+rank-bm25>=0.2.2       # BM25 baseline

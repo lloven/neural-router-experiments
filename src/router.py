@@ -1,0 +1,674 @@
+"""Neural Router: core matching engine.
+
+Implements the three algorithms from the paper:
+  1. OptimizeSubscriptions (offline): cluster + compress subscriptions
+  2. MatchEvents (online): assign events to clusters + LLM matching
+  3. CoverAndMerge: LLM-assisted subscription compression
+"""
+
+from __future__ import annotations
+
+import json
+import logging
+import time
+from dataclasses import dataclass, field
+from typing import Any, Optional
+
+import numpy as np
+from sklearn.cluster import KMeans
+from sklearn.metrics.pairwise import cosine_similarity
+
+from .data import Dataset, Event, Subscription
+from .llm import LLMClient, LLMResponse
+from .embeddings import EmbeddingModel
+
+logger = logging.getLogger(__name__)
+
+
+# ---------------------------------------------------------------------------
+# Data structures
+# ---------------------------------------------------------------------------
+
+@dataclass
+class Cluster:
+    """A subscription cluster with compressed subscriptions and centroid."""
+    id: int
+    subscriptions: list[Subscription]          # original subscriptions
+    compressed: Optional[list[Subscription]] = None  # after C&M
+    centroid: Optional[np.ndarray] = None
+    llm: Optional[str] = None
+    queue: list[Event] = field(default_factory=list)  # events assigned to this cluster
+
+    @property
+    def active_subscriptions(self) -> list[Subscription]:
+        """Return compressed subscriptions if available, else originals."""
+        return self.compressed if self.compressed is not None else self.subscriptions
+
+    @property
+    def compression_ratio(self) -> float:
+        """ρ_c = |S'| / |S|"""
+        if self.compressed is None:
+            return 1.0
+        return len(self.compressed) / max(len(self.subscriptions), 1)
+
+
+@dataclass
+class MatchResult:
+    """Result of matching a single event."""
+    event_id: str
+    matched_subscription_ids: list[str]
+    scores: Optional[list[float]] = None  # relevance scores if available
+
+
+@dataclass
+class RouterStats:
+    """Statistics from a routing run."""
+    num_events: int = 0
+    num_subscriptions: int = 0
+    num_clusters: int = 0
+    compression_ratio: float = 1.0
+    llm_invocations: int = 0
+    total_prompt_tokens: int = 0
+    total_response_tokens: int = 0
+    embedding_time_s: float = 0.0
+    clustering_time_s: float = 0.0
+    cover_merge_time_s: float = 0.0
+    cosine_filter_time_s: float = 0.0
+    llm_inference_time_s: float = 0.0
+    post_processing_time_s: float = 0.0
+    total_time_s: float = 0.0
+
+
+# ---------------------------------------------------------------------------
+# Configuration
+# ---------------------------------------------------------------------------
+
+@dataclass
+class RouterConfig:
+    """Configuration for a Neural Router run (corresponds to an ablation config)."""
+    # Components (ablation toggles)
+    use_clustering: bool = True       # cluster subscriptions
+    use_cover_merge: bool = True      # compress via C&M
+    use_reunite: bool = False         # merge clusters back after C&M
+    use_event_clustering: bool = False  # cluster events before matching
+    use_cosine_filter: bool = True    # pre-filter events by cosine threshold
+
+    # Parameters
+    k: int = 19                       # number of subscription clusters
+    tau: float = 0.3                  # cosine similarity threshold
+    kappa: int = 3                    # top-K matches
+    adaptive_kappa: bool = False      # let LLM decide match count
+
+    # Event clustering
+    k_events: int = 5                 # number of event clusters (if enabled)
+
+    # Cover/Merge
+    cm_max_iterations: int = 10
+
+    # LLM
+    llm_model: str = "gpt-4o-mini"
+    llm_temperature: float = 0.0
+    context_window: int = 128000
+    t_inst: int = 200
+    t_resp: int = 500
+
+    # Embedding
+    embedding_model: str = "all-MiniLM-L6-v2"
+
+    # Parallelism (for cost model; actual parallelism handled by LLM client)
+    max_parallel: int = 10
+
+    # Random seed (for k-means)
+    seed: int = 42
+
+    @property
+    def config_name(self) -> str:
+        """Return a short descriptive name."""
+        if not self.use_clustering and not self.use_cover_merge:
+            return "A0_raw_llm"
+        elif self.use_clustering and not self.use_cover_merge:
+            return "A1_cluster_only"
+        elif not self.use_clustering and self.use_cover_merge:
+            return "A2_cm_only"
+        elif self.use_reunite:
+            return "A4_reunite"
+        elif self.use_event_clustering:
+            return "A5_event_clust"
+        elif not self.use_cosine_filter:
+            return "A6_no_cosine"
+        else:
+            return "A3_clust_cm"
+
+
+# Predefined ablation configurations
+ABLATION_CONFIGS = {
+    "A0": RouterConfig(
+        use_clustering=False, use_cover_merge=False,
+        use_cosine_filter=False,
+    ),
+    "A1": RouterConfig(
+        use_clustering=True, use_cover_merge=False,
+        use_cosine_filter=True,
+    ),
+    "A2": RouterConfig(
+        use_clustering=False, use_cover_merge=True,
+        use_cosine_filter=False,
+    ),
+    "A3": RouterConfig(
+        use_clustering=True, use_cover_merge=True,
+        use_cosine_filter=True,
+    ),
+    "A4": RouterConfig(
+        use_clustering=True, use_cover_merge=True,
+        use_reunite=True, use_cosine_filter=False,
+    ),
+    "A5": RouterConfig(
+        use_clustering=True, use_cover_merge=True,
+        use_event_clustering=True, use_cosine_filter=True,
+    ),
+    "A6": RouterConfig(
+        use_clustering=True, use_cover_merge=True,
+        use_cosine_filter=False,  # tau=0 equivalent
+    ),
+}
+
+
+# ---------------------------------------------------------------------------
+# Neural Router
+# ---------------------------------------------------------------------------
+
+class NeuralRouter:
+    """Neural Router matching engine."""
+
+    def __init__(
+        self,
+        config: RouterConfig,
+        llm_client: LLMClient,
+        embedding_model: Optional[EmbeddingModel] = None,
+    ):
+        self.config = config
+        self.llm = llm_client
+        self.embedder = embedding_model
+        self.clusters: list[Cluster] = []
+        self.stats = RouterStats()
+
+    # -------------------------------------------------------------------
+    # Algorithm 1: OptimizeSubscriptions (offline)
+    # -------------------------------------------------------------------
+
+    def optimize_subscriptions(self, subscriptions: list[Subscription]) -> list[Cluster]:
+        """Cluster and compress subscriptions (offline phase).
+
+        Algorithm 1 from the paper:
+        1. Embed all subscriptions
+        2. K-means clustering (if enabled)
+        3. CoverAndMerge per cluster (if enabled)
+        4. Optionally reunite clusters
+        """
+        self.stats.num_subscriptions = len(subscriptions)
+        t0 = time.time()
+
+        # Step 1: Embed subscriptions
+        t_embed = time.time()
+        sub_texts = [s.description for s in subscriptions]
+        sub_embeddings = self.embedder.encode(sub_texts)
+        self.stats.embedding_time_s = time.time() - t_embed
+        logger.info(f"Embedded {len(subscriptions)} subscriptions in {self.stats.embedding_time_s:.2f}s")
+
+        # Step 2: Cluster (or single cluster)
+        t_clust = time.time()
+        if self.config.use_clustering and self.config.k > 1:
+            k = min(self.config.k, len(subscriptions))
+            kmeans = KMeans(n_clusters=k, random_state=self.config.seed, n_init=10)
+            labels = kmeans.fit_predict(sub_embeddings)
+
+            clusters = []
+            for i in range(k):
+                mask = labels == i
+                cluster_subs = [subscriptions[j] for j in range(len(subscriptions)) if mask[j]]
+                cluster_embeds = sub_embeddings[mask]
+                centroid = cluster_embeds.mean(axis=0)
+                clusters.append(Cluster(
+                    id=i,
+                    subscriptions=cluster_subs,
+                    centroid=centroid,
+                    llm=self.config.llm_model,
+                ))
+        else:
+            # Single cluster (A0 or A2)
+            centroid = sub_embeddings.mean(axis=0)
+            clusters = [Cluster(
+                id=0,
+                subscriptions=list(subscriptions),
+                centroid=centroid,
+                llm=self.config.llm_model,
+            )]
+        self.stats.clustering_time_s = time.time() - t_clust
+        self.stats.num_clusters = len(clusters)
+        logger.info(f"Created {len(clusters)} clusters in {self.stats.clustering_time_s:.2f}s")
+
+        # Step 3: Cover/Merge per cluster
+        t_cm = time.time()
+        if self.config.use_cover_merge:
+            for cluster in clusters:
+                cluster.compressed = self._cover_and_merge(cluster.subscriptions)
+                logger.info(
+                    f"Cluster {cluster.id}: {len(cluster.subscriptions)} → "
+                    f"{len(cluster.compressed)} subscriptions (ρ={cluster.compression_ratio:.2f})"
+                )
+        self.stats.cover_merge_time_s = time.time() - t_cm
+
+        # Step 4: Reunite (if enabled)
+        if self.config.use_reunite and len(clusters) > 1:
+            all_compressed = []
+            for c in clusters:
+                all_compressed.extend(c.active_subscriptions)
+            merged_centroid = sub_embeddings.mean(axis=0)
+            clusters = [Cluster(
+                id=0,
+                subscriptions=[s for c in clusters for s in c.subscriptions],
+                compressed=all_compressed,
+                centroid=merged_centroid,
+                llm=self.config.llm_model,
+            )]
+            logger.info(f"Reunited into single cluster with {len(all_compressed)} subscriptions")
+
+        self.clusters = clusters
+
+        # Compute overall compression ratio
+        total_original = sum(len(c.subscriptions) for c in clusters)
+        total_compressed = sum(len(c.active_subscriptions) for c in clusters)
+        self.stats.compression_ratio = total_compressed / max(total_original, 1)
+
+        self.stats.total_time_s = time.time() - t0
+        return clusters
+
+    # -------------------------------------------------------------------
+    # Algorithm 2: MatchEvents (online)
+    # -------------------------------------------------------------------
+
+    def match_events(self, events: list[Event]) -> list[MatchResult]:
+        """Match events to subscriptions via cluster assignment + LLM.
+
+        Algorithm 2 from the paper:
+        1. Embed events and assign to clusters by cosine similarity
+        2. For each cluster, batch events and invoke LLM
+        """
+        self.stats.num_events = len(events)
+        t0 = time.time()
+
+        if not self.clusters:
+            raise RuntimeError("Call optimize_subscriptions() first")
+
+        # Step 1: Embed events
+        t_embed = time.time()
+        event_texts = [e.text for e in events]
+        event_embeddings = self.embedder.encode(event_texts)
+        self.stats.embedding_time_s += time.time() - t_embed
+
+        # Step 2: Assign events to clusters
+        t_filter = time.time()
+        # Clear previous queues
+        for cluster in self.clusters:
+            cluster.queue = []
+
+        if self.config.use_cosine_filter and len(self.clusters) > 1:
+            # Cosine pre-filter: assign event to clusters where similarity >= tau
+            centroids = np.array([c.centroid for c in self.clusters])
+            similarities = cosine_similarity(event_embeddings, centroids)
+
+            for i, event in enumerate(events):
+                assigned = False
+                for j, cluster in enumerate(self.clusters):
+                    if similarities[i, j] >= self.config.tau:
+                        cluster.queue.append(event)
+                        assigned = True
+                if not assigned:
+                    # Assign to nearest cluster as fallback
+                    nearest = int(np.argmax(similarities[i]))
+                    self.clusters[nearest].queue.append(event)
+        else:
+            # No filter: all events go to all clusters
+            for cluster in self.clusters:
+                cluster.queue = list(events)
+
+        self.stats.cosine_filter_time_s = time.time() - t_filter
+
+        # Log assignment distribution
+        for c in self.clusters:
+            logger.debug(f"Cluster {c.id}: {len(c.queue)} events assigned")
+
+        # Step 3: LLM matching per cluster
+        t_llm = time.time()
+        all_results: dict[str, MatchResult] = {}
+
+        for cluster in self.clusters:
+            if not cluster.queue:
+                continue
+
+            cluster_results = self._match_cluster(cluster)
+            for result in cluster_results:
+                if result.event_id in all_results:
+                    # Merge results from multiple clusters
+                    existing = all_results[result.event_id]
+                    existing.matched_subscription_ids.extend(
+                        result.matched_subscription_ids
+                    )
+                else:
+                    all_results[result.event_id] = result
+
+        self.stats.llm_inference_time_s = time.time() - t_llm
+
+        # Post-process: deduplicate and trim to top-kappa
+        t_post = time.time()
+        final_results = []
+        for event in events:
+            if event.id in all_results:
+                result = all_results[event.id]
+                # Deduplicate subscription matches
+                seen = set()
+                unique_matches = []
+                for sid in result.matched_subscription_ids:
+                    if sid not in seen:
+                        seen.add(sid)
+                        unique_matches.append(sid)
+                if not self.config.adaptive_kappa:
+                    unique_matches = unique_matches[:self.config.kappa]
+                result.matched_subscription_ids = unique_matches
+                final_results.append(result)
+            else:
+                final_results.append(MatchResult(event_id=event.id, matched_subscription_ids=[]))
+
+        self.stats.post_processing_time_s = time.time() - t_post
+        self.stats.total_time_s = time.time() - t0
+
+        return final_results
+
+    # -------------------------------------------------------------------
+    # Algorithm 3: CoverAndMerge
+    # -------------------------------------------------------------------
+
+    def _cover_and_merge(self, subscriptions: list[Subscription]) -> list[Subscription]:
+        """LLM-assisted subscription compression (Algorithm 3).
+
+        Iteratively asks the LLM to identify:
+        - Covering pairs: s_i subsumes s_j -> remove s_j
+        - Merge candidates: s_i, s_j -> combined subscription
+
+        Repeats until fixed point (no changes) or max iterations.
+        """
+        current = list(subscriptions)
+
+        for iteration in range(self.config.cm_max_iterations):
+            if len(current) <= 1:
+                break
+
+            prompt = self._build_cover_merge_prompt(current)
+            response = self.llm.invoke(prompt)
+            self.stats.llm_invocations += 1
+            self.stats.total_prompt_tokens += response.prompt_tokens
+            self.stats.total_response_tokens += response.response_tokens
+
+            try:
+                operations = self._parse_cover_merge_response(response.text, current)
+            except Exception as e:
+                logger.warning(f"Failed to parse C&M response (iter {iteration}): {e}")
+                break
+
+            covers = operations.get("covers", [])
+            merges = operations.get("merges", [])
+
+            if not covers and not merges:
+                logger.info(f"C&M converged after {iteration + 1} iterations")
+                break
+
+            # Apply covers: remove subsumed subscriptions
+            to_remove = set()
+            for parent_id, child_id in covers:
+                to_remove.add(child_id)
+
+            current = [s for s in current if s.id not in to_remove]
+
+            # Apply merges: replace pairs with merged subscription
+            merge_remove = set()
+            new_subs = []
+            for s1_id, s2_id, merged_desc in merges:
+                merge_remove.add(s1_id)
+                merge_remove.add(s2_id)
+                # Create merged subscription preserving both IDs
+                new_subs.append(Subscription(
+                    id=f"{s1_id}+{s2_id}",
+                    name=f"Merged({s1_id}, {s2_id})",
+                    description=merged_desc,
+                ))
+
+            current = [s for s in current if s.id not in merge_remove]
+            current.extend(new_subs)
+
+            logger.debug(
+                f"C&M iter {iteration}: {len(covers)} covers, {len(merges)} merges "
+                f"→ {len(current)} subscriptions"
+            )
+
+        return current
+
+    # -------------------------------------------------------------------
+    # LLM prompt construction
+    # -------------------------------------------------------------------
+
+    def _match_cluster(self, cluster: Cluster) -> list[MatchResult]:
+        """Match all events in a cluster's queue against its subscriptions."""
+        subs = cluster.active_subscriptions
+        events = cluster.queue
+        results = []
+
+        # Compute batch size based on context window
+        avg_sub_tokens = self._estimate_tokens(
+            "\n".join(f"- [{s.id}] {s.description}" for s in subs)
+        ) / max(len(subs), 1) * len(subs)
+        avg_event_tokens = 50  # rough estimate, refined per-event
+
+        # Estimate max batch size
+        available = self.config.context_window - self.config.t_inst - avg_sub_tokens - self.config.t_resp
+        if available <= 0:
+            # Subscriptions alone exceed window; match one event at a time
+            batch_size = 1
+        else:
+            batch_size = max(1, int(available / max(avg_event_tokens, 1)))
+
+        # Process in batches
+        for i in range(0, len(events), batch_size):
+            batch = events[i:i + batch_size]
+            prompt = self._build_match_prompt(subs, batch)
+            response = self.llm.invoke(prompt)
+            self.stats.llm_invocations += 1
+            self.stats.total_prompt_tokens += response.prompt_tokens
+            self.stats.total_response_tokens += response.response_tokens
+
+            try:
+                batch_results = self._parse_match_response(response.text, batch)
+                results.extend(batch_results)
+            except Exception as e:
+                logger.warning(f"Failed to parse match response for batch {i}: {e}")
+                # Return empty matches for failed batch
+                for event in batch:
+                    results.append(MatchResult(event_id=event.id, matched_subscription_ids=[]))
+
+        return results
+
+    def _build_match_prompt(
+        self,
+        subscriptions: list[Subscription],
+        events: list[Event],
+    ) -> str:
+        """Build the event matching prompt (Listing 2 from the paper)."""
+        sub_text = "\n".join(
+            f"- [{s.id}] {s.description}" for s in subscriptions
+        )
+        event_text = "\n\n".join(
+            f"Event [{e.id}]:\n{e.text}" for e in events
+        )
+
+        kappa_instruction = (
+            "Return all subscriptions that match."
+            if self.config.adaptive_kappa
+            else f"Return the top {self.config.kappa} matches."
+        )
+
+        return f"""# Role
+Semantic matching engine for a content-based publish/subscribe system.
+
+# Task
+For each event below, identify which subscriptions it satisfies. A **match** means the event content is relevant to the subscriber's stated interest. Consider meaning, paraphrases, and related concepts, not just keyword overlap.
+
+# Subscriptions
+{sub_text}
+
+# Events
+{event_text}
+
+# Steps
+For each event:
+1. Evaluate it against every subscription using semantic similarity.
+2. Rank matching subscriptions by relevance.
+3. {kappa_instruction} If fewer match, return only those that do. If none match, return an empty list.
+
+# Constraints
+- Evaluate every (event, subscription) pair; do not skip subscriptions.
+- When uncertain, prefer inclusion (favour recall over precision).
+
+# Output
+Return a JSON object mapping event IDs to lists of matching subscription IDs.
+Example: {{"event_1": ["sub_a", "sub_b"], "event_2": ["sub_c"]}}
+Only return the JSON, no other text."""
+
+    def _build_cover_merge_prompt(self, subscriptions: list[Subscription]) -> str:
+        """Build the cover/merge prompt (Listing 1 from the paper)."""
+        sub_text = "\n".join(
+            f"- [{s.id}] {s.description}" for s in subscriptions
+        )
+
+        return f"""# Role
+Subscription optimiser for a content-based publish/subscribe system.
+
+# Task
+Compress the subscription set below while preserving matching accuracy. Every original identifier **must** be retained.
+
+# Subscriptions
+{sub_text}
+
+# Steps
+1. **Subsumption test** -- For every pair, check whether one subscription semantically subsumes another (i.e., every event that matches the narrower one also matches the broader one).
+2. **Combine subsumed** -- Merge each subsumed subscription into its parent. Concatenate identifier lists.
+3. **Merge similar** -- Where subsumption does not apply, merge subscriptions that can be combined into a single, more general description without reducing accuracy. Each identifier must appear exactly once across all outputs.
+4. **Compress text** -- Shorten every remaining subscription to the most concise phrasing that preserves its semantic scope.
+
+# Constraints
+- Never drop or duplicate an identifier.
+- Prefer recall: when uncertain whether two subscriptions overlap, keep them separate.
+
+# Output
+Return a JSON object with two keys:
+- "covers": list of [parent_id, child_id] pairs where parent subsumes child
+- "merges": list of [id1, id2, "merged description"] triples
+Example: {{"covers": [["sports", "football"]], "merges": [["arts_&_culture", "music", "Arts, culture, and music entertainment"]]}}
+Only return the JSON, no other text."""
+
+    def _parse_match_response(
+        self, response_text: str, events: list[Event],
+    ) -> list[MatchResult]:
+        """Parse the LLM's JSON response for event matching."""
+        # Try to extract JSON from response
+        text = response_text.strip()
+        if text.startswith("```"):
+            # Strip markdown code fences
+            lines = text.split("\n")
+            text = "\n".join(lines[1:-1] if lines[-1].strip() == "```" else lines[1:])
+
+        data = json.loads(text)
+
+        results = []
+        for event in events:
+            matches = data.get(event.id, [])
+            if isinstance(matches, list):
+                # Flatten any nested lists and ensure string IDs
+                flat = []
+                for m in matches:
+                    if isinstance(m, str):
+                        flat.append(m)
+                    elif isinstance(m, list) and m:
+                        flat.append(str(m[0]))
+                results.append(MatchResult(
+                    event_id=event.id,
+                    matched_subscription_ids=flat,
+                ))
+            else:
+                results.append(MatchResult(event_id=event.id, matched_subscription_ids=[]))
+
+        return results
+
+    def _parse_cover_merge_response(
+        self, response_text: str, subscriptions: list[Subscription],
+    ) -> dict[str, list]:
+        """Parse the LLM's JSON response for cover/merge operations."""
+        text = response_text.strip()
+        if text.startswith("```"):
+            lines = text.split("\n")
+            text = "\n".join(lines[1:-1] if lines[-1].strip() == "```" else lines[1:])
+
+        data = json.loads(text)
+
+        covers = []
+        for pair in data.get("covers", []):
+            if len(pair) >= 2:
+                covers.append((str(pair[0]), str(pair[1])))
+
+        merges = []
+        for triple in data.get("merges", []):
+            if len(triple) >= 3:
+                merges.append((str(triple[0]), str(triple[1]), str(triple[2])))
+
+        return {"covers": covers, "merges": merges}
+
+    def _estimate_tokens(self, text: str) -> int:
+        """Rough token count estimate (4 chars per token)."""
+        return len(text) // 4
+
+    # -------------------------------------------------------------------
+    # Cost model
+    # -------------------------------------------------------------------
+
+    def predict_invocations(self) -> int:
+        """Predict total LLM invocations using the cost model (Eq. 4)."""
+        if not self.clusters:
+            return 0
+
+        total = 0
+        for cluster in self.clusters:
+            subs = cluster.active_subscriptions
+            avg_t_s = 80  # tokens per subscription (estimate)
+            avg_t_e = 50  # tokens per event (estimate)
+
+            b_max = max(1, (
+                self.config.context_window
+                - self.config.t_inst
+                - len(subs) * avg_t_s
+                - self.config.t_resp
+            ) // avg_t_e)
+
+            m_c = len(cluster.queue)
+            i_c = (m_c + b_max - 1) // b_max  # ceiling division
+            total += i_c
+
+        return total
+
+    def predict_latency(self, t_llm: float = 0.2) -> float:
+        """Predict end-to-end latency using the cost model (Eq. 5).
+
+        Args:
+            t_llm: mean wall-clock time per LLM invocation (seconds)
+        """
+        I = self.predict_invocations()
+        P = self.config.max_parallel
+        R = (I + P - 1) // P  # ceiling division
+        return R * t_llm
