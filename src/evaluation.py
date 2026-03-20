@@ -89,6 +89,8 @@ class EvaluationResult:
             "invocations": self.invocations,
             "compression_ratio": self.compression_ratio,
             "latency_s": self.latency_s,
+            "tokens_prompt": self.tokens_prompt,
+            "tokens_response": self.tokens_response,
             "cost_per_1k": self.cost_per_1k,
         }
 

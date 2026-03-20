@@ -2,13 +2,20 @@
 
 Provides a unified interface over three benchmark datasets used to evaluate
 the Neural Router's content-based publish/subscribe matching (Table 1 in the
-paper):
+paper).  The datasets form a progression of semantic difficulty:
 
-  D1: CardiffNLP Tweet Topic -- multi-label, 19 topics, short tweets (~25 words)
+  D1: CardiffNLP Tweet Topic -- multi-label, 19 topics, short tweets (~25 words).
+                                Low semantic gap: keywords overlap between events
+                                and subscription descriptions.
   D2: MultiEURLEX           -- multi-label, 127 EUROVOC level-2 labels, long EU
-                               legal documents (~700 words, truncated to 2000)
-  D3: MN-DS                 -- single-label at level-2, 109 IPTC Media Topics,
-                               medium news articles (~250 words)
+                                legal documents (~700 words, truncated to 2000).
+                                High semantic gap: domain-specific legal jargon,
+                                structured taxonomy.
+  D3: CASAS Aruba IoT       -- single-label, ~11 ADL activities, smart home
+                                sensor event sequences (~20-50 readings/event).
+                                Very high semantic gap: raw sensor data vs.
+                                natural-language activity descriptions.  Requires
+                                abductive reasoning to bridge modality mismatch.
 
 Key abstractions:
   Subscription  -- a topic (filter) that events can match against
@@ -110,7 +117,7 @@ def load_dataset_by_name(
 
     Args:
         name: Dataset identifier. Accepts short names (D1, D2, D3) or
-            aliases (cardiffnlp, eurlex, mnds).
+            aliases (cardiffnlp, eurlex, casas).
         cache_dir: Directory for HuggingFace / Zenodo caches.
         max_events: If set, randomly subsample to this many events
             (deterministic, seed=42).
@@ -126,8 +133,8 @@ def load_dataset_by_name(
         return load_cardiffnlp(cache_dir=cache_dir, max_events=max_events)
     elif name_lower in ("d2", "eurlex", "multi_eurlex", "multieurlex"):
         return load_eurlex(cache_dir=cache_dir, max_events=max_events)
-    elif name_lower in ("d3", "mnds", "mn-ds", "mn_ds"):
-        return load_mnds(cache_dir=cache_dir, max_events=max_events)
+    elif name_lower in ("d3", "casas", "casas_iot", "aruba"):
+        return load_casas(cache_dir=cache_dir, max_events=max_events)
     else:
         raise ValueError(f"Unknown dataset: {name}. Use D1/D2/D3.")
 
@@ -364,70 +371,67 @@ def _load_eurovoc_descriptions(
 
 
 # ---------------------------------------------------------------------------
-# D3: MN-DS (Multilabeled News Dataset)
+# D3: CASAS Aruba IoT (smart home ADL activities, free-living)
 # ---------------------------------------------------------------------------
 
-def load_mnds(
+def load_casas(
     cache_dir: Optional[str] = None,
     max_events: Optional[int] = None,
 ) -> Dataset:
-    """Load D3: MN-DS (Multilabeled News) dataset from local CSV or Zenodo.
+    """Load D3: CASAS Aruba smart home IoT dataset from pre-fetched CSV.
 
-    MN-DS is single-label at level-2: each article maps to exactly one IPTC
-    Media Topic at level-2. The original paper's term "multilabeled" refers
-    to hierarchical labeling (level-1 + level-2), not multiple level-2 labels.
+    The CASAS Aruba dataset must first be downloaded and converted using
+    ``scripts/fetch_casas.py``, which produces ``data/casas_iot.csv``
+    (events) and ``data/casas_iot_subscriptions.csv`` (subscriptions).
+
+    The Aruba dataset contains naturalistic free-living sensor data from a
+    single-resident apartment over approximately 8 months (Nov 2010 - Jun 2011).
+    Each event is a sequence of motion/door sensor readings from one annotated
+    activity segment.  Ground truth is single-label (one activity per segment).
+
+    This dataset has the highest semantic gap in the evaluation: raw sensor
+    readings (e.g., "sensor M014 (motion) reported ON") share no vocabulary
+    with activity descriptions (e.g., "resident is preparing food").  Accurate
+    matching requires abductive reasoning about what sensor patterns imply.
 
     Args:
-        cache_dir: Directory containing (or to download to)
-            ``MN-DS-news-classification.csv``.
+        cache_dir: Directory containing the pre-fetched CSV files.
         max_events: Cap on number of events (deterministic subsample).
 
     Returns:
-        Dataset with ~109 subscriptions and single-label events.
+        Dataset with ~11 subscriptions and single-label events.
     """
     data_dir = Path(cache_dir or "data")
-    csv_path = data_dir / "MN-DS-news-classification.csv"
+    events_path = data_dir / "casas_iot.csv"
+    subs_path = data_dir / "casas_iot_subscriptions.csv"
 
-    if not csv_path.exists():
-        logger.info("MN-DS CSV not found locally, downloading from Zenodo...")
-        _download_mnds(csv_path)
+    if not events_path.exists():
+        raise FileNotFoundError(
+            f"CASAS events CSV not found at {events_path}. "
+            "Run scripts/fetch_casas.py first to download and convert the dataset."
+        )
 
-    logger.info("Loading MN-DS dataset...")
-    df = pd.read_csv(csv_path)
-    logger.info(f"Loaded {len(df)} articles from MN-DS")
-
-    # Get level-2 categories
-    level2_categories = sorted(df["category_level_2"].dropna().unique().tolist())
-    logger.info(f"Found {len(level2_categories)} level-2 IPTC categories")
+    logger.info("Loading CASAS Aruba IoT dataset...")
+    events_df = pd.read_csv(events_path)
+    subs_df = pd.read_csv(subs_path)
+    logger.info(f"Loaded {len(events_df)} events, {len(subs_df)} subscriptions from CASAS Aruba")
 
     # Build subscriptions
     subscriptions = []
-    for cat in level2_categories:
+    for _, row in subs_df.iterrows():
         subscriptions.append(Subscription(
-            id=cat,
-            name=cat,
-            description=f"News articles about {cat.lower()}",
+            id=row["id"],
+            name=row["name"],
+            description=row["description"],
         ))
 
     # Build events
     events = []
-    for i, row in df.iterrows():
-        text = str(row.get("content", ""))
-        title = str(row.get("title", ""))
-        if not text or text == "nan":
-            continue
-
-        cat = row.get("category_level_2")
-        if pd.isna(cat):
-            continue
-
-        # Use title + content for matching
-        full_text = f"{title}\n\n{text}" if title and title != "nan" else text
-
+    for _, row in events_df.iterrows():
         events.append(Event(
-            id=f"mnds_{i}",
-            text=full_text,
-            ground_truth=[cat],  # single label at level-2
+            id=row["id"],
+            text=row["text"],
+            ground_truth=[row["ground_truth"]],  # single label
         ))
 
     if max_events and len(events) > max_events:
@@ -436,24 +440,13 @@ def load_mnds(
         events = [events[i] for i in sorted(indices)]
 
     return Dataset(
-        name="MN-DS (Multilabeled News)",
+        name="CASAS Aruba IoT (Smart Home ADL)",
         short_name="D3",
         events=events,
         subscriptions=subscriptions,
         metadata={
-            "source": "zenodo:7394851",
-            "multi_label": False,  # single label at level-2
-            "note": "Each article has one level-2 IPTC category",
+            "source": "zenodo:15708568 (Aruba subset)",
+            "multi_label": False,
+            "note": "Each event is a sensor sequence from one annotated activity segment",
         },
     )
-
-
-def _download_mnds(output_path: Path) -> None:
-    """Download MN-DS CSV from Zenodo (record 7394851)."""
-    import urllib.request
-
-    url = "https://zenodo.org/api/records/7394851/files/MN-DS-news-classification.csv/content"
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-    logger.info(f"Downloading MN-DS from {url}...")
-    urllib.request.urlretrieve(url, output_path)
-    logger.info(f"Saved to {output_path}")

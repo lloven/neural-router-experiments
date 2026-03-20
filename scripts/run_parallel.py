@@ -206,7 +206,7 @@ def main():
 
     # Load API key from .env
     from dotenv import load_dotenv
-    load_dotenv()
+    load_dotenv(override=True)
 
     datasets = ALL_DATASETS if args.dataset.lower() == "all" else args.dataset.split(",")
     configs = ALL_CONFIGS if args.configs.lower() == "all" else args.configs.split(",")
