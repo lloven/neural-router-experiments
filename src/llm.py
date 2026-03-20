@@ -60,8 +60,10 @@ class LLMClient:
         temperature: float = 0.0,
         max_tokens: int = 4096,
         api_key: Optional[str] = None,
+        timeout: Optional[int] = None,
     ):
         self.model = model
+        self.timeout = timeout  # per-request timeout in seconds (None = litellm default)
         self.temperature = temperature
         self.max_tokens = max_tokens
         self._api_key = api_key
@@ -70,11 +72,12 @@ class LLMClient:
         self._total_response_tokens = 0
         self._total_latency = 0.0
 
-    def invoke(self, prompt: str) -> LLMResponse:
+    def invoke(self, prompt: str, max_retries: int = 5) -> LLMResponse:
         """Invoke the LLM with a single-turn prompt.
 
         Args:
             prompt: The user-message content to send.
+            max_retries: Max retries on rate-limit or overloaded errors.
 
         Returns:
             An LLMResponse with the completion text and usage metadata.
@@ -84,39 +87,50 @@ class LLMClient:
         """
         import litellm
 
-        t0 = time.time()
-        try:
-            response = litellm.completion(
-                model=self.model,
-                messages=[{"role": "user", "content": prompt}],
-                temperature=self.temperature,
-                max_tokens=self.max_tokens,
-                api_key=self._api_key,
-            )
+        for attempt in range(max_retries):
+            t0 = time.time()
+            try:
+                kwargs = dict(
+                    model=self.model,
+                    messages=[{"role": "user", "content": prompt}],
+                    temperature=self.temperature,
+                    max_tokens=self.max_tokens,
+                    api_key=self._api_key,
+                )
+                if self.timeout is not None:
+                    kwargs["timeout"] = self.timeout
+                response = litellm.completion(**kwargs)
 
-            text = response.choices[0].message.content or ""
-            prompt_tokens = response.usage.prompt_tokens if response.usage else 0
-            response_tokens = response.usage.completion_tokens if response.usage else 0
-            latency = time.time() - t0
+                text = response.choices[0].message.content or ""
+                prompt_tokens = response.usage.prompt_tokens if response.usage else 0
+                response_tokens = response.usage.completion_tokens if response.usage else 0
+                latency = time.time() - t0
 
-            self._total_invocations += 1
-            self._total_prompt_tokens += prompt_tokens
-            self._total_response_tokens += response_tokens
-            self._total_latency += latency
+                self._total_invocations += 1
+                self._total_prompt_tokens += prompt_tokens
+                self._total_response_tokens += response_tokens
+                self._total_latency += latency
 
-            return LLMResponse(
-                text=text,
-                prompt_tokens=prompt_tokens,
-                response_tokens=response_tokens,
-                latency_s=latency,
-                model=self.model,
-                raw_response=response.model_dump() if hasattr(response, "model_dump") else None,
-            )
+                return LLMResponse(
+                    text=text,
+                    prompt_tokens=prompt_tokens,
+                    response_tokens=response_tokens,
+                    latency_s=latency,
+                    model=self.model,
+                    raw_response=response.model_dump() if hasattr(response, "model_dump") else None,
+                )
 
-        except Exception as e:
-            latency = time.time() - t0
-            logger.error(f"LLM invocation failed after {latency:.2f}s: {e}")
-            raise
+            except Exception as e:
+                latency = time.time() - t0
+                err_str = str(e).lower()
+                is_retryable = "rate_limit" in err_str or "429" in str(e) or "overloaded" in err_str
+                if is_retryable and attempt < max_retries - 1:
+                    wait = 2 ** attempt * 5  # 5s, 10s, 20s, 40s
+                    logger.warning(f"Retryable error, waiting {wait}s (attempt {attempt+1}/{max_retries}): {e}")
+                    time.sleep(wait)
+                    continue
+                logger.error(f"LLM invocation failed after {latency:.2f}s: {e}")
+                raise
 
     @property
     def total_invocations(self) -> int:

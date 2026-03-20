@@ -151,6 +151,7 @@ class RouterConfig:
     # LLM settings (used in the cost model, Eq. 4)
     llm_model: str = "gpt-4o-mini"
     llm_temperature: float = 0.0
+    llm_max_tokens: int = 16384       # max output tokens (Haiku: 4096)
     context_window: int = 128000      # W: context window size in tokens
     t_inst: int = 200                 # t_inst: instruction overhead in tokens
     t_resp: int = 500                 # t_resp: reserved response budget in tokens
@@ -161,6 +162,12 @@ class RouterConfig:
     # Parallelism
     max_parallel: int = 10
     use_async: bool = True             # use async LLM calls for parallel matching
+    max_batch_events: int = 200        # hard cap on events per LLM call (avoids JSON serialization issues)
+    llm_timeout: int = 600             # per-request timeout in seconds (increase for local models)
+
+    # Prompt size control
+    max_event_words: int | None = None  # truncate event text in LLM prompts (None = no truncation)
+    max_sub_words: int | None = None    # truncate subscription text in LLM prompts (None = no truncation)
 
     # Random seed (for k-means)
     seed: int = 42
@@ -552,22 +559,37 @@ class NeuralRouter:
 
         # Compute batch size from the cost model (Eq. 4):
         #   b_max = floor((W - t_inst - |S_c| * t_s - t_resp) / t_e)
-        avg_sub_tokens = self._estimate_tokens(
-            "\n".join(f"- [{s.id}] {s.description}" for s in subs)
-        ) / max(len(subs), 1) * len(subs)
-        avg_event_tokens = 50  # rough per-event token estimate
+        sub_text = "\n".join(f"- [{s.id}] {s.description}" for s in subs)
+        avg_sub_tokens = self._estimate_tokens(sub_text)
+        # Estimate per-event tokens from actual event texts
+        if events:
+            sample = events[:min(20, len(events))]
+            avg_event_tokens = max(10, int(
+                sum(self._estimate_tokens(f"- [{e.id}] {e.text}") for e in sample)
+                / len(sample)
+            ))
+        else:
+            avg_event_tokens = 50
 
         available = self.config.context_window - self.config.t_inst - avg_sub_tokens - self.config.t_resp
         if available <= 0:
-            # Subscriptions alone exceed window; match one event at a time
             batch_size = 1
         else:
             batch_size = max(1, int(available / max(avg_event_tokens, 1)))
+            batch_size = max(1, int(batch_size * 0.8))  # 20% safety margin
+            batch_size = min(batch_size, self.config.max_batch_events)  # hard cap
 
         # Process in batches
         for i in range(0, len(events), batch_size):
             batch = events[i:i + batch_size]
             prompt = self._build_match_prompt(subs, batch)
+
+            # Validate prompt fits; halve batch if too large
+            prompt_tokens = self._estimate_tokens(prompt)
+            while prompt_tokens > self.config.context_window * 0.95 and len(batch) > 1:
+                batch = batch[:len(batch) // 2]
+                prompt = self._build_match_prompt(subs, batch)
+                prompt_tokens = self._estimate_tokens(prompt)
             response = self.llm.invoke(prompt)
             self.stats.llm_invocations += 1
             self.stats.total_prompt_tokens += response.prompt_tokens
@@ -640,10 +662,16 @@ class NeuralRouter:
             events = cluster.queue
 
             # Compute batch size (same logic as _match_cluster)
-            avg_sub_tokens = self._estimate_tokens(
-                "\n".join(f"- [{s.id}] {s.description}" for s in subs)
-            ) / max(len(subs), 1) * len(subs)
-            avg_event_tokens = 50
+            sub_text = "\n".join(f"- [{s.id}] {s.description}" for s in subs)
+            avg_sub_tokens = self._estimate_tokens(sub_text)
+            if events:
+                sample = events[:min(20, len(events))]
+                avg_event_tokens = max(10, int(
+                    sum(self._estimate_tokens(f"- [{e.id}] {e.text}") for e in sample)
+                    / len(sample)
+                ))
+            else:
+                avg_event_tokens = 50
 
             available = (
                 self.config.context_window
@@ -653,38 +681,72 @@ class NeuralRouter:
             )
             batch_size = max(1, int(available / max(avg_event_tokens, 1))) if available > 0 else 1
 
+            # Safety margin: reduce by 20% to account for prompt template overhead
+            batch_size = max(1, int(batch_size * 0.8))
+            batch_size = min(batch_size, self.config.max_batch_events)  # hard cap
+
+            logger.info(
+                f"  Cluster {cluster.id}: {len(events)} events, "
+                f"batch_size={batch_size}, avg_event_tokens={avg_event_tokens}"
+            )
+
             for i in range(0, len(events), batch_size):
                 batch = events[i:i + batch_size]
                 prompt = self._build_match_prompt(subs, batch)
+
+                # Validate prompt fits context window; halve batch if too large
+                prompt_tokens = self._estimate_tokens(prompt)
+                while prompt_tokens > self.config.context_window * 0.95 and len(batch) > 1:
+                    batch = batch[:len(batch) // 2]
+                    prompt = self._build_match_prompt(subs, batch)
+                    prompt_tokens = self._estimate_tokens(prompt)
+                    logger.warning(
+                        f"  Prompt too large ({prompt_tokens} est. tokens), "
+                        f"reduced batch to {len(batch)} events"
+                    )
+
                 prompt_tasks.append((prompt, cluster, batch))
 
         logger.info(f"Async matching: {len(prompt_tasks)} prompts across {len(self.clusters)} clusters")
 
-        # Phase 2: Fire all prompts concurrently
+        # Phase 2: Fire all prompts concurrently (with retry on rate limits)
         async def _invoke_one(prompt: str) -> LLMResponse:
-            async with semaphore:
-                t0 = time.time()
-                try:
-                    response = await litellm.acompletion(
-                        model=self.config.llm_model,
-                        messages=[{"role": "user", "content": prompt}],
-                        temperature=self.config.llm_temperature,
-                        max_tokens=4096,
-                    )
-                    text = response.choices[0].message.content or ""
-                    prompt_tokens = response.usage.prompt_tokens if response.usage else 0
-                    response_tokens = response.usage.completion_tokens if response.usage else 0
-                    latency = time.time() - t0
-                    return LLMResponse(
-                        text=text,
-                        prompt_tokens=prompt_tokens,
-                        response_tokens=response_tokens,
-                        latency_s=latency,
-                        model=self.config.llm_model,
-                    )
-                except Exception as e:
-                    logger.error(f"Async LLM call failed after {time.time() - t0:.2f}s: {e}")
-                    raise
+            max_retries = 5
+            for attempt in range(max_retries):
+                async with semaphore:
+                    t0 = time.time()
+                    try:
+                        response = await asyncio.wait_for(
+                            litellm.acompletion(
+                                model=self.config.llm_model,
+                                messages=[{"role": "user", "content": prompt}],
+                                temperature=self.config.llm_temperature,
+                                max_tokens=self.config.llm_max_tokens,
+                                timeout=self.config.llm_timeout,
+                            ),
+                            timeout=self.config.llm_timeout + 60,
+                        )
+                        text = response.choices[0].message.content or ""
+                        prompt_tokens = response.usage.prompt_tokens if response.usage else 0
+                        response_tokens = response.usage.completion_tokens if response.usage else 0
+                        latency = time.time() - t0
+                        return LLMResponse(
+                            text=text,
+                            prompt_tokens=prompt_tokens,
+                            response_tokens=response_tokens,
+                            latency_s=latency,
+                            model=self.config.llm_model,
+                        )
+                    except Exception as e:
+                        latency = time.time() - t0
+                        is_rate_limit = "rate_limit" in str(e).lower() or "429" in str(e)
+                        if is_rate_limit and attempt < max_retries - 1:
+                            wait = 2 ** attempt * 5  # 5s, 10s, 20s, 40s
+                            logger.warning(f"Rate limited, retrying in {wait}s (attempt {attempt+1}/{max_retries})")
+                            await asyncio.sleep(wait)
+                            continue
+                        logger.error(f"Async LLM call failed after {latency:.2f}s: {e}")
+                        raise
 
         coros = [_invoke_one(prompt) for prompt, _, _ in prompt_tasks]
         responses = await asyncio.gather(*coros, return_exceptions=True)
@@ -745,11 +807,21 @@ class NeuralRouter:
         Returns:
             Complete prompt string ready for LLM invocation.
         """
+        def _truncate(text: str, max_words: int | None) -> str:
+            if max_words is None:
+                return text
+            words = text.split()
+            if len(words) <= max_words:
+                return text
+            return " ".join(words[:max_words]) + " [...]"
+
         sub_text = "\n".join(
-            f"- [{s.id}] {s.description}" for s in subscriptions
+            f"- [{s.id}] {_truncate(s.description, self.config.max_sub_words)}"
+            for s in subscriptions
         )
+
         event_text = "\n\n".join(
-            f"Event [{e.id}]:\n{e.text}" for e in events
+            f"Event [{e.id}]:\n{_truncate(e.text, self.config.max_event_words)}" for e in events
         )
 
         kappa_instruction = (
@@ -906,8 +978,12 @@ Only return the JSON, no other text."""
         return {"covers": covers, "merges": merges}
 
     def _estimate_tokens(self, text: str) -> int:
-        """Rough token count estimate (4 chars per token)."""
-        return len(text) // 4
+        """Conservative token count estimate (~3.2 chars per token).
+
+        GPT tokenizers average 3-3.5 characters per token for English text.
+        We use 3.2 to avoid under-estimating and exceeding context windows.
+        """
+        return int(len(text) / 3.2)
 
     # -------------------------------------------------------------------
     # Cost model
