@@ -710,6 +710,18 @@ class NeuralRouter:
         logger.info(f"Async matching: {len(prompt_tasks)} prompts across {len(self.clusters)} clusters")
 
         # Phase 2: Fire all prompts concurrently (with retry on rate limits)
+        def _is_fatal_error(e: Exception) -> bool:
+            """Detect non-transient API errors that should abort the run."""
+            err_str = str(e).lower()
+            fatal_patterns = [
+                "usage limit",       # billing/budget exhausted
+                "invalid_api_key",   # bad credentials
+                "authentication",    # auth failure
+                "permission",        # permission denied
+                "not_found_error",   # model deprecated/removed
+            ]
+            return any(p in err_str for p in fatal_patterns)
+
         async def _invoke_one(prompt: str) -> LLMResponse:
             max_retries = 5
             for attempt in range(max_retries):
@@ -739,6 +751,10 @@ class NeuralRouter:
                         )
                     except Exception as e:
                         latency = time.time() - t0
+                        # Fatal errors (billing, auth) should not be retried
+                        if _is_fatal_error(e):
+                            logger.error(f"Fatal API error (aborting run): {e}")
+                            raise
                         is_rate_limit = "rate_limit" in str(e).lower() or "429" in str(e)
                         if is_rate_limit and attempt < max_retries - 1:
                             wait = 2 ** attempt * 5  # 5s, 10s, 20s, 40s
@@ -753,6 +769,22 @@ class NeuralRouter:
 
         # Phase 3: Parse responses and merge results
         all_results: dict[str, MatchResult] = {}
+
+        # Check for fatal errors first: if ANY response is a fatal error,
+        # abort immediately rather than producing silent all-empty results
+        for resp in responses:
+            if isinstance(resp, BaseException) and _is_fatal_error(resp):
+                logger.error(f"Fatal error detected in batch, aborting: {resp}")
+                raise resp
+
+        # Count failures for early-abort on mass transient failures
+        failure_count = sum(1 for r in responses if isinstance(r, BaseException))
+        if failure_count == len(responses) and len(responses) > 0:
+            first_error = next(r for r in responses if isinstance(r, BaseException))
+            logger.error(f"All {len(responses)} async calls failed. First error: {first_error}")
+            raise RuntimeError(
+                f"All {len(responses)} LLM calls failed. First error: {first_error}"
+            )
 
         for (prompt, cluster, batch), resp in zip(prompt_tasks, responses):
             if isinstance(resp, BaseException):

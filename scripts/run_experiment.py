@@ -155,7 +155,16 @@ def save_checkpoint(
     data = {"matches": matches, "num_completed": num_completed}
     with open(tmp_path, "wb") as f:
         pickle.dump(data, f, protocol=pickle.HIGHEST_PROTOCOL)
-    tmp_path.rename(path)
+    # Retry rename up to 3 times (Dropbox sync can transiently lock files)
+    for attempt in range(3):
+        try:
+            tmp_path.rename(path)
+            break
+        except OSError:
+            if attempt < 2:
+                time.sleep(1)
+            else:
+                raise
     logger.debug(f"  Checkpoint saved: {num_completed} events ({path.name})")
 
 

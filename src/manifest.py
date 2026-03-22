@@ -82,6 +82,18 @@ class Manifest:
     def get_pending_runs(self) -> list[RunEntry]:
         return [r for r in self.runs.values() if r.status == "pending"]
 
+    def reset_failed_to_pending(self) -> int:
+        """Reset all failed runs back to pending so they can be retried.
+
+        Returns the number of runs reset.
+        """
+        count = 0
+        for entry in self.runs.values():
+            if entry.status == "failed":
+                entry.status = "pending"
+                count += 1
+        return count
+
     def update_run(self, run_id: str, **kwargs: Any) -> None:
         entry = self.runs[run_id]
         for k, v in kwargs.items():

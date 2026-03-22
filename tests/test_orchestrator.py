@@ -129,6 +129,28 @@ class TestCreateOrLoadManifest:
         assert len(manifest.runs) == 1
         assert manifest.runs["existing-run"].status == "done"
 
+    def test_reset_failed_to_pending(self, tmp_path):
+        """Manifest.reset_failed_to_pending() transitions all failed runs."""
+        run_a = _make_run("run-a")
+        run_a.status = "failed"
+        run_b = _make_run("run-b")
+        run_b.status = "done"
+        run_c = _make_run("run-c")
+        run_c.status = "failed"
+        run_d = _make_run("run-d")
+        run_d.status = "pending"
+        m = Manifest(mode="full", runs={
+            "run-a": run_a, "run-b": run_b, "run-c": run_c, "run-d": run_d,
+        })
+
+        count = m.reset_failed_to_pending()
+
+        assert count == 2
+        assert m.runs["run-a"].status == "pending"
+        assert m.runs["run-b"].status == "done"  # unchanged
+        assert m.runs["run-c"].status == "pending"
+        assert m.runs["run-d"].status == "pending"  # was already pending
+
     def test_resets_stale_running_to_pending(self, tmp_path):
         """Running entries from a crashed previous run reset to pending."""
         manifest_path = tmp_path / "full" / "manifest.json"

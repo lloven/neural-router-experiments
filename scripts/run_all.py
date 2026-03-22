@@ -25,6 +25,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from src.config import load_profile
 from src.manifest import Manifest, SlotPool, generate_runs, sort_by_priority
+from src.ops_log import get_manifest_state, log_api_limit, log_milestone, log_shutdown, log_startup
 
 
 # ---------------------------------------------------------------------------
@@ -150,9 +151,14 @@ def orchestrate(
     api_slots: int = 2,
     dry_run: bool = False,
     results_root: str = "results",
+    ops_log_path: Path | str | None = None,
 ) -> None:
     """Main orchestration loop."""
     manifest_path = Path(results_root) / mode / "manifest.json"
+    if ops_log_path is None:
+        ops_log_path = Path("OPERATIONS_LOG.md")
+    else:
+        ops_log_path = Path(ops_log_path)
     profile = load_profile(mode)
 
     manifest = create_or_load_manifest(manifest_path, mode, profile)
@@ -164,16 +170,27 @@ def orchestrate(
     pool = SlotPool(ollama_max=ollama_slots, api_max=api_slots)
     active_processes: dict[str, subprocess.Popen] = {}
 
+    # -- Ops log: startup ----------------------------------------------------
+    slot_config = {"api_slots": api_slots, "ollama_slots": ollama_slots}
+    log_startup(ops_log_path, get_manifest_state(manifest), slot_config)
+
+    # Track milestone thresholds (every 25 completions)
+    last_milestone = (
+        sum(1 for r in manifest.runs.values() if r.status == "done") // 25
+    ) * 25
+
     # Graceful shutdown: stop launching new runs on SIGINT/SIGTERM
     shutting_down = False
+    shutdown_reason = "clean exit"
 
     def _shutdown_handler(signum, frame):
-        nonlocal shutting_down
+        nonlocal shutting_down, shutdown_reason
         if shutting_down:
             # Second signal: hard exit
             print("\nForce quit.")
             sys.exit(1)
         shutting_down = True
+        shutdown_reason = f"signal {signum}"
         print("\nShutting down gracefully (waiting for active runs to finish)...")
 
     signal.signal(signal.SIGINT, _shutdown_handler)
@@ -195,8 +212,20 @@ def orchestrate(
                 del active_processes[run_id]
                 if entry.status == "done":
                     print(f"\n  [+] {run_id}: done")
+                    # -- Ops log: milestone check ----------------------------
+                    done_count = sum(
+                        1 for r in manifest.runs.values() if r.status == "done"
+                    )
+                    if done_count >= last_milestone + 25:
+                        last_milestone = (done_count // 25) * 25
+                        log_milestone(
+                            ops_log_path, get_manifest_state(manifest),
+                        )
                 else:
                     print(f"\n  [!] {run_id}: {entry.status} - {entry.error}")
+                    # -- Ops log: API limit detection ------------------------
+                    if entry.error and "usage limit" in entry.error.lower():
+                        log_api_limit(ops_log_path, run_id, entry.error)
 
         # 2. Launch new runs if slots available (unless shutting down)
         if not shutting_down:
@@ -220,6 +249,9 @@ def orchestrate(
     pending = sum(1 for r in manifest.runs.values() if r.status == "pending")
     print(f"\n\nOrchestrator finished: {done} done, {failed} failed, "
           f"{pending} pending out of {len(manifest.runs)} total.")
+
+    # -- Ops log: shutdown ---------------------------------------------------
+    log_shutdown(ops_log_path, get_manifest_state(manifest), shutdown_reason)
 
 
 # ---------------------------------------------------------------------------
