@@ -17,5 +17,9 @@ figs/
 # Environment
 .env
 
+# Operations log (contains runtime data, budget info; template is tracked)
+OPERATIONS_LOG.md
+logs/
+
 # OS
 .DS_Store
