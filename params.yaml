@@ -18,7 +18,7 @@ profiles:
     seeds: [42]
     ablation:
       configs: [A0, A6]
-      baselines: [bm25]
+      baselines: [bm25, zero_shot]
     max_events: 20
     max_event_words: 100
     datasets: [D1]
@@ -34,7 +34,7 @@ profiles:
     seeds: [42]
     ablation:
       configs: [A0, A3, A6]
-      baselines: [bm25, sbert]
+      baselines: [bm25, sbert, zero_shot]
     max_events: 100
     max_event_words: 200
     datasets: [D1, D2, D3]
@@ -50,7 +50,7 @@ profiles:
     seeds: [42, 123, 456, 789, 1024]
     ablation:
       configs: [A0, A1, A2, A3, A4, A5, A6]
-      baselines: [bm25, sbert, cross_encoder, tfidf, glove, word2vec]
+      baselines: [bm25, sbert, cross_encoder, tfidf, glove, word2vec, zero_shot]
     max_events: null
     max_event_words: null
     datasets: [D1, D2, D3]

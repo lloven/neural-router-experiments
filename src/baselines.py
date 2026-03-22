@@ -1,6 +1,6 @@
 """Baseline matching methods for comparison with the Neural Router (Section 4.4).
 
-Six non-LLM baselines that match events to subscriptions using different
+Seven non-LLM baselines that match events to subscriptions using different
 text similarity approaches. These serve as reference points in the ablation
 study (Table 3 in the paper):
 
@@ -10,6 +10,7 @@ study (Table 3 in the paper):
   4. TF-IDF        -- sparse bag-of-words cosine similarity
   5. GloVe         -- average word-vector cosine similarity (100d)
   6. Word2Vec      -- average word-vector cosine similarity (300d)
+  7. Zero-shot     -- NLI classification (facebook/bart-large-mnli)
 
 All baselines return the top-kappa subscriptions per event.
 """
@@ -49,14 +50,17 @@ def run_baseline(
     method: str,
     dataset: Dataset,
     kappa: int = 3,
+    **kwargs,
 ) -> BaselineResult:
     """Run a baseline matching method on a dataset.
 
     Args:
         method: One of "bm25", "sbert", "cross_encoder", "glove", "tfidf",
-            "word2vec".
+            "word2vec", "zero_shot".
         dataset: Loaded dataset with events and subscriptions.
         kappa: Number of top matches to return per event.
+        **kwargs: Extra arguments passed to the baseline function
+            (e.g., model_name for zero_shot).
 
     Returns:
         BaselineResult with per-event matches and wall-clock latency.
@@ -71,13 +75,21 @@ def run_baseline(
         "glove": _run_glove,
         "tfidf": _run_tfidf,
         "word2vec": _run_word2vec,
+        "zero_shot": _run_zero_shot,
     }
 
     if method not in dispatch:
         raise ValueError(f"Unknown baseline: {method}. Available: {list(dispatch.keys())}")
 
     t0 = time.time()
-    matches = dispatch[method](dataset, kappa)
+    fn = dispatch[method]
+    # Pass kwargs only to functions that accept them (zero_shot)
+    import inspect
+    sig = inspect.signature(fn)
+    if len(sig.parameters) > 2:
+        matches = fn(dataset, kappa, **kwargs)
+    else:
+        matches = fn(dataset, kappa)
     latency = time.time() - t0
 
     return BaselineResult(method=method, matches=matches, latency_s=latency)
@@ -285,6 +297,58 @@ def _run_word2vec(dataset: Dataset, kappa: int) -> list[MatchResult]:
     for i, event in enumerate(dataset.events):
         top_indices = np.argsort(similarities[i])[::-1][:kappa]
         matched_ids = [dataset.subscriptions[j].id for j in top_indices]
+        results.append(MatchResult(event_id=event.id, matched_subscription_ids=matched_ids))
+
+    return results
+
+
+# ---------------------------------------------------------------------------
+# Zero-shot classification (BART-large-MNLI)
+# ---------------------------------------------------------------------------
+
+def _run_zero_shot(
+    dataset: Dataset,
+    kappa: int,
+    model_name: str = "facebook/bart-large-mnli",
+) -> list[MatchResult]:
+    """Zero-shot NLI classification using facebook/bart-large-mnli.
+
+    Each event is classified against subscription descriptions as candidate
+    labels using Hugging Face's zero-shot-classification pipeline. This
+    represents the strongest non-LLM baseline: a dedicated NLI model for
+    textual entailment, without requiring any LLM invocation.
+
+    The pipeline computes entailment scores for each (event, subscription)
+    pair and returns the top-kappa subscriptions by score.
+
+    Args:
+        dataset: Loaded dataset with events and subscriptions.
+        kappa: Number of top matches to return per event.
+        model_name: HuggingFace model for zero-shot classification.
+            Default: facebook/bart-large-mnli. Use a smaller model
+            (e.g., typeform/distilbart-mnli-12-1) for testing.
+    """
+    from transformers import pipeline
+
+    classifier = pipeline(
+        "zero-shot-classification",
+        model=model_name,
+        device=-1,  # CPU (use device=0 for GPU)
+    )
+
+    candidate_labels = [s.description for s in dataset.subscriptions]
+    label_to_id = {s.description: s.id for s in dataset.subscriptions}
+
+    results = []
+    for event in dataset.events:
+        output = classifier(
+            event.text,
+            candidate_labels,
+            multi_label=True,
+        )
+        # output['labels'] is sorted by score descending
+        top_labels = output["labels"][:kappa]
+        matched_ids = [label_to_id[label] for label in top_labels]
         results.append(MatchResult(event_id=event.id, matched_subscription_ids=matched_ids))
 
     return results

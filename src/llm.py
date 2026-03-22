@@ -123,6 +123,11 @@ class LLMClient:
             except Exception as e:
                 latency = time.time() - t0
                 err_str = str(e).lower()
+                # Fatal errors (billing/auth) should never be retried
+                fatal_patterns = ["usage limit", "invalid_api_key", "authentication", "permission", "not_found_error"]
+                if any(p in err_str for p in fatal_patterns):
+                    logger.error(f"Fatal API error (not retrying): {e}")
+                    raise
                 is_retryable = "rate_limit" in err_str or "429" in str(e) or "overloaded" in err_str
                 if is_retryable and attempt < max_retries - 1:
                     wait = 2 ** attempt * 5  # 5s, 10s, 20s, 40s
