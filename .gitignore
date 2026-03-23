@@ -16,6 +16,7 @@ figs/
 
 # Environment
 .env
+remote.yaml
 
 # Operations log (contains runtime data, budget info; template is tracked)
 OPERATIONS_LOG.md

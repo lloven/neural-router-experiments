@@ -1,0 +1,8 @@
+# Remote VM configuration for Neural Router experiments.
+# Copy to remote.yaml and fill in your values.
+# remote.yaml is gitignored; this template is tracked.
+
+ssh_host: nrouter-vm           # SSH config alias (see ~/.ssh/config)
+remote_dir: ~/neural-router    # Working directory on the VM
+venv_path: ~/neural-router/.venv
+ollama_model: qwen2.5:7b      # Model for local GPU inference

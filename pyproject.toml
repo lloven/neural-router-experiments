@@ -1,0 +1,5 @@
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = [
+    "remote: tests requiring SSH access to the remote VM (deselect with '-m not remote')",
+]
