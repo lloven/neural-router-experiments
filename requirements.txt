@@ -6,7 +6,8 @@ litellm>=1.30.0
 openai>=1.12.0
 
 # Embeddings
-sentence-transformers>=2.5.0
+httpx>=0.27.0                          # Ollama API client (default backend, no torch)
+sentence-transformers>=2.5.0           # Optional: local dev backend (imports torch)
 
 # Clustering & ML
 scikit-learn>=1.4.0
