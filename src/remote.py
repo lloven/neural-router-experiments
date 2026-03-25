@@ -21,6 +21,7 @@ class RemoteConfig:
     remote_dir: str = "~/neural-router"
     venv_path: str = "~/neural-router/.venv"
     ollama_model: str = "qwen2.5:7b"
+    ollama_embed_model: str = "nomic-embed-text"
 
 
 # --- Environment variable mapping -------------------------------------------
@@ -30,6 +31,7 @@ _ENV_MAP = {
     "NROUTER_REMOTE_DIR": "remote_dir",
     "NROUTER_VENV_PATH": "venv_path",
     "NROUTER_OLLAMA_MODEL": "ollama_model",
+    "NROUTER_OLLAMA_EMBED_MODEL": "ollama_embed_model",
 }
 
 
@@ -74,16 +76,25 @@ def check_ssh_connection(config: RemoteConfig) -> bool:
 
 
 def check_ollama_health(config: RemoteConfig) -> dict:
-    """Check if Ollama is running on the VM and the required model is available.
+    """Check if Ollama is running on the VM and required models are available.
 
-    Returns dict with 'available' (bool) and 'models' (list of model names).
+    Returns dict with:
+      - 'available' (bool): True if the LLM model is available.
+      - 'embed_available' (bool): True if the embeddings model is available.
+      - 'models' (list of model names): all models found on the VM.
+      - 'error' (str, optional): error message if Ollama is unreachable.
     """
     result = subprocess.run(
         ["ssh", "-o", "ConnectTimeout=5", config.ssh_host, "ollama", "list"],
         capture_output=True, text=True, timeout=15,
     )
     if result.returncode != 0:
-        return {"available": False, "models": [], "error": result.stderr.strip()}
+        return {
+            "available": False,
+            "embed_available": False,
+            "models": [],
+            "error": result.stderr.strip(),
+        }
 
     models = []
     for line in result.stdout.strip().splitlines()[1:]:  # skip header
@@ -93,5 +104,6 @@ def check_ollama_health(config: RemoteConfig) -> dict:
 
     return {
         "available": config.ollama_model in models,
+        "embed_available": config.ollama_embed_model in models,
         "models": models,
     }

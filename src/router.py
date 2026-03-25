@@ -38,7 +38,7 @@ from sklearn.metrics.pairwise import cosine_similarity
 
 from .data import Dataset, Event, Subscription
 from .llm import DryRunLLMClient, LLMClient, LLMResponse
-from .embeddings import EmbeddingModel
+from .embeddings import EmbeddingModel, OllamaEmbeddings
 
 logger = logging.getLogger(__name__)
 
@@ -108,6 +108,7 @@ class RouterStats:
     llm_inference_time_s: float = 0.0
     post_processing_time_s: float = 0.0
     total_time_s: float = 0.0
+    num_subscriptions_effective: int = 0  # after context-window truncation
 
 
 # ---------------------------------------------------------------------------
@@ -168,6 +169,7 @@ class RouterConfig:
     # Prompt size control
     max_event_words: int | None = None  # truncate event text in LLM prompts (None = no truncation)
     max_sub_words: int | None = None    # truncate subscription text in LLM prompts (None = no truncation)
+    max_context_tokens: int | None = None  # hard token budget for crossover experiment (None = use context_window)
 
     # Random seed (for k-means)
     seed: int = 42
@@ -232,6 +234,56 @@ ABLATION_CONFIGS = {
 
 
 # ---------------------------------------------------------------------------
+# Context-window truncation (crossover experiment support)
+# ---------------------------------------------------------------------------
+
+def _estimate_tokens_simple(text: str) -> int:
+    """Fast token estimate: ~4 chars per token (GPT-family heuristic)."""
+    return max(1, len(text) // 4)
+
+
+def truncate_subscriptions_to_budget(
+    subscriptions: list,
+    budget_tokens: int | None,
+    t_inst: int = 200,
+    t_resp: int = 500,
+) -> list:
+    """Return the longest prefix of *subscriptions* that fits within *budget_tokens*.
+
+    The budget accounts for instruction overhead (t_inst) and response budget
+    (t_resp).  Subscriptions are added greedily in order until the next one
+    would exceed the remaining capacity.
+
+    Args:
+        subscriptions: Ordered subscription list.
+        budget_tokens: Hard token ceiling.  ``None`` means unlimited.
+        t_inst: Instruction template overhead in tokens.
+        t_resp: Reserved response budget in tokens.
+
+    Returns:
+        A (possibly shorter) prefix of *subscriptions*.
+    """
+    if budget_tokens is None:
+        return list(subscriptions)
+
+    available = budget_tokens - t_inst - t_resp
+    if available <= 0:
+        return []
+
+    result = []
+    running = 0
+    for sub in subscriptions:
+        line = f"- [{sub.id}] {sub.description}"
+        tokens = _estimate_tokens_simple(line)
+        if running + tokens > available:
+            break
+        running += tokens
+        result.append(sub)
+
+    return result
+
+
+# ---------------------------------------------------------------------------
 # Neural Router
 # ---------------------------------------------------------------------------
 
@@ -245,14 +297,14 @@ class NeuralRouter:
     Args:
         config: Full router configuration (ablation toggles + hyperparameters).
         llm_client: LLM client for semantic matching and CoverAndMerge.
-        embedding_model: Sentence-transformer for encoding texts to embeddings.
+        embedding_model: Embedding backend (OllamaEmbeddings or EmbeddingModel).
     """
 
     def __init__(
         self,
         config: RouterConfig,
         llm_client: LLMClient,
-        embedding_model: Optional[EmbeddingModel] = None,
+        embedding_model: Optional[EmbeddingModel | OllamaEmbeddings] = None,
     ):
         self.config = config
         self.llm = llm_client
@@ -557,6 +609,22 @@ class NeuralRouter:
         events = cluster.queue
         results = []
 
+        # Context-window truncation (crossover experiment): drop subscriptions
+        # that don't fit within the hard token budget.
+        if self.config.max_context_tokens is not None:
+            subs = truncate_subscriptions_to_budget(
+                subs,
+                budget_tokens=self.config.max_context_tokens,
+                t_inst=self.config.t_inst,
+                t_resp=self.config.t_resp,
+            )
+            self.stats.num_subscriptions_effective += len(subs)
+            if len(subs) < len(cluster.active_subscriptions):
+                logger.info(
+                    f"  Context truncation: {len(cluster.active_subscriptions)} → "
+                    f"{len(subs)} subscriptions (budget={self.config.max_context_tokens})"
+                )
+
         # Compute batch size from the cost model (Eq. 4):
         #   b_max = floor((W - t_inst - |S_c| * t_s - t_resp) / t_e)
         sub_text = "\n".join(f"- [{s.id}] {s.description}" for s in subs)
@@ -660,6 +728,16 @@ class NeuralRouter:
                 continue
             subs = cluster.active_subscriptions
             events = cluster.queue
+
+            # Context-window truncation (crossover experiment)
+            if self.config.max_context_tokens is not None:
+                subs = truncate_subscriptions_to_budget(
+                    subs,
+                    budget_tokens=self.config.max_context_tokens,
+                    t_inst=self.config.t_inst,
+                    t_resp=self.config.t_resp,
+                )
+                self.stats.num_subscriptions_effective += len(subs)
 
             # Compute batch size (same logic as _match_cluster)
             sub_text = "\n".join(f"- [{s.id}] {s.description}" for s in subs)
