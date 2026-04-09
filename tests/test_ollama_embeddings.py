@@ -22,6 +22,9 @@ import importlib.util
 import json
 import os
 import sys
+import json as _json
+import urllib.error
+import urllib.request
 from unittest.mock import patch, MagicMock
 
 import numpy as np
@@ -134,17 +137,20 @@ class TestOllamaEmbeddingsEncode:
         from src.embeddings import OllamaEmbeddings
         return OllamaEmbeddings(**kwargs)
 
+    def _mock_urlopen_response(self, embedding: list[float]) -> MagicMock:
+        """Build a context-manager mock for urllib.request.urlopen."""
+        mock_resp = MagicMock()
+        mock_resp.read.return_value = _json.dumps(_make_ollama_response(embedding)).encode()
+        mock_resp.__enter__ = MagicMock(return_value=mock_resp)
+        mock_resp.__exit__ = MagicMock(return_value=False)
+        return mock_resp
+
     def test_encode_returns_ndarray(self):
         """encode() must return a numpy ndarray of shape (n_texts, dim)."""
         model = self._make_model()
         fake_embedding = [0.1] * 768
 
-        with patch("httpx.post") as mock_post:
-            mock_resp = MagicMock()
-            mock_resp.json.return_value = _make_ollama_response(fake_embedding)
-            mock_resp.raise_for_status = MagicMock()
-            mock_post.return_value = mock_resp
-
+        with patch("urllib.request.urlopen", return_value=self._mock_urlopen_response(fake_embedding)):
             result = model.encode(["hello world"])
 
         assert isinstance(result, np.ndarray)
@@ -155,12 +161,7 @@ class TestOllamaEmbeddingsEncode:
         model = self._make_model(model="nomic-embed-text")
         fake_embedding = list(np.random.randn(768).tolist())
 
-        with patch("httpx.post") as mock_post:
-            mock_resp = MagicMock()
-            mock_resp.json.return_value = _make_ollama_response(fake_embedding)
-            mock_resp.raise_for_status = MagicMock()
-            mock_post.return_value = mock_resp
-
+        with patch("urllib.request.urlopen", return_value=self._mock_urlopen_response(fake_embedding)):
             result = model.encode(["test text"])
 
         assert result.shape[1] == 768
@@ -170,15 +171,10 @@ class TestOllamaEmbeddingsEncode:
         model = self._make_model()
         texts = ["first", "second", "third"]
 
-        def side_effect(url, **kwargs):
-            mock_resp = MagicMock()
-            mock_resp.json.return_value = _make_ollama_response(
-                list(np.random.randn(768).tolist())
-            )
-            mock_resp.raise_for_status = MagicMock()
-            return mock_resp
+        def side_effect(req, **kwargs):
+            return self._mock_urlopen_response(list(np.random.randn(768).tolist()))
 
-        with patch("httpx.post", side_effect=side_effect):
+        with patch("urllib.request.urlopen", side_effect=side_effect):
             result = model.encode(texts)
 
         assert result.shape == (3, 768)
@@ -188,12 +184,7 @@ class TestOllamaEmbeddingsEncode:
         model = self._make_model()
         raw = np.random.randn(768).tolist()
 
-        with patch("httpx.post") as mock_post:
-            mock_resp = MagicMock()
-            mock_resp.json.return_value = _make_ollama_response(raw)
-            mock_resp.raise_for_status = MagicMock()
-            mock_post.return_value = mock_resp
-
+        with patch("urllib.request.urlopen", return_value=self._mock_urlopen_response(raw)):
             result = model.encode(["text"], normalize=True)
 
         norms = np.linalg.norm(result, axis=1)
@@ -208,43 +199,49 @@ class TestOllamaEmbeddingsErrors:
     """Error handling when Ollama is unreachable or returns errors."""
 
     def test_connection_error_raises(self):
-        """ConnectionError when Ollama server is down."""
+        """URLError when Ollama server is down."""
         from src.embeddings import OllamaEmbeddings
-        import httpx
 
         model = OllamaEmbeddings(base_url="http://localhost:99999")
 
-        with patch("httpx.post", side_effect=httpx.ConnectError("Connection refused")):
-            with pytest.raises(httpx.ConnectError):
+        with patch("urllib.request.urlopen", side_effect=urllib.error.URLError("Connection refused")):
+            with pytest.raises(urllib.error.URLError):
                 model.encode(["test"])
 
     def test_http_error_raises(self):
-        """HTTP 500 from Ollama should raise."""
+        """HTTP 500 from Ollama should raise HTTPError."""
         from src.embeddings import OllamaEmbeddings
-        import httpx
 
         model = OllamaEmbeddings()
 
-        mock_resp = MagicMock()
-        mock_resp.raise_for_status.side_effect = httpx.HTTPStatusError(
-            "Server Error", request=MagicMock(), response=MagicMock()
+        http_error = urllib.error.HTTPError(
+            url="http://localhost:11434/api/embed",
+            code=500,
+            msg="Server Error",
+            hdrs=None,
+            fp=None,
         )
 
-        with patch("httpx.post", return_value=mock_resp):
-            with pytest.raises(httpx.HTTPStatusError):
+        with patch("urllib.request.urlopen", side_effect=http_error):
+            with pytest.raises(urllib.error.HTTPError):
                 model.encode(["test"])
 
     def test_model_not_found_error(self):
-        """Ollama returns error when model not pulled."""
+        """Ollama returns 404 when model not pulled."""
         from src.embeddings import OllamaEmbeddings
 
         model = OllamaEmbeddings(model="nonexistent-model")
 
-        mock_resp = MagicMock()
-        mock_resp.raise_for_status.side_effect = Exception("model 'nonexistent-model' not found")
+        http_error = urllib.error.HTTPError(
+            url="http://localhost:11434/api/embed",
+            code=404,
+            msg="model 'nonexistent-model' not found",
+            hdrs=None,
+            fp=None,
+        )
 
-        with patch("httpx.post", return_value=mock_resp):
-            with pytest.raises(Exception, match="not found"):
+        with patch("urllib.request.urlopen", side_effect=http_error):
+            with pytest.raises(urllib.error.HTTPError):
                 model.encode(["test"])
 
 
@@ -255,6 +252,14 @@ class TestOllamaEmbeddingsErrors:
 class TestOllamaEmbeddingsCaching:
     """OllamaEmbeddings must support the same disk caching as EmbeddingModel."""
 
+    def _mock_urlopen_response(self, embedding: list[float]) -> MagicMock:
+        """Build a context-manager mock for urllib.request.urlopen."""
+        mock_resp = MagicMock()
+        mock_resp.read.return_value = _json.dumps(_make_ollama_response(embedding)).encode()
+        mock_resp.__enter__ = MagicMock(return_value=mock_resp)
+        mock_resp.__exit__ = MagicMock(return_value=False)
+        return mock_resp
+
     def test_cache_hit_skips_http_call(self, tmp_path):
         """Second encode() with same texts should use cache, not HTTP."""
         from src.embeddings import OllamaEmbeddings
@@ -262,19 +267,14 @@ class TestOllamaEmbeddingsCaching:
         model = OllamaEmbeddings(cache_dir=str(tmp_path))
         fake_embedding = list(np.random.randn(768).tolist())
 
-        with patch("httpx.post") as mock_post:
-            mock_resp = MagicMock()
-            mock_resp.json.return_value = _make_ollama_response(fake_embedding)
-            mock_resp.raise_for_status = MagicMock()
-            mock_post.return_value = mock_resp
-
+        with patch("urllib.request.urlopen", return_value=self._mock_urlopen_response(fake_embedding)) as mock_urlopen:
             # First call: hits Ollama
             result1 = model.encode(["cached text"])
-            assert mock_post.call_count == 1
+            assert mock_urlopen.call_count == 1
 
             # Second call: should use cache
             result2 = model.encode(["cached text"])
-            assert mock_post.call_count == 1  # no additional HTTP call
+            assert mock_urlopen.call_count == 1  # no additional HTTP call
 
         np.testing.assert_array_equal(result1, result2)
 
@@ -286,17 +286,12 @@ class TestOllamaEmbeddingsCaching:
 
         call_count = 0
 
-        def side_effect(url, **kwargs):
+        def side_effect(req, **kwargs):
             nonlocal call_count
             call_count += 1
-            mock_resp = MagicMock()
-            mock_resp.json.return_value = _make_ollama_response(
-                list(np.random.randn(768).tolist())
-            )
-            mock_resp.raise_for_status = MagicMock()
-            return mock_resp
+            return self._mock_urlopen_response(list(np.random.randn(768).tolist()))
 
-        with patch("httpx.post", side_effect=side_effect):
+        with patch("urllib.request.urlopen", side_effect=side_effect):
             model.encode(["text A"])
             model.encode(["text B"])
 
