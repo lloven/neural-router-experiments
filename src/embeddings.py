@@ -88,7 +88,8 @@ class OllamaEmbeddings:
         Returns:
             numpy array of shape (len(texts), dimension).
         """
-        import httpx
+        import json as _json
+        import urllib.request
 
         # Try loading from cache
         cache_key = self._cache_key(texts, normalize)
@@ -100,13 +101,16 @@ class OllamaEmbeddings:
 
         embeddings = []
         for text in texts:
-            resp = httpx.post(
+            # Use urllib instead of httpx — httpx triggers vfork cascade
+            # on LXD containers with cgroup CPU limits (L46)
+            data = _json.dumps({"model": self.model_name, "input": text}).encode()
+            req = urllib.request.Request(
                 f"{self.base_url}/api/embed",
-                json={"model": self.model_name, "input": text},
-                timeout=60.0,
+                data=data,
+                headers={"Content-Type": "application/json"},
             )
-            resp.raise_for_status()
-            embedding = resp.json()["embeddings"][0]
+            with urllib.request.urlopen(req, timeout=60) as resp:
+                embedding = _json.loads(resp.read())["embeddings"][0]
             embeddings.append(embedding)
 
         result = np.array(embeddings, dtype=np.float32)
