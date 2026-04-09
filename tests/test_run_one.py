@@ -268,6 +268,122 @@ class TestExecutorDispatch:
         mock_scaling.assert_called_once()
 
 
+class TestExecutorFlushesResults:
+    """Verify ablation results are written to CSV at entry.result_file."""
+
+    @patch("scripts.run_one.run_ablation_stage")
+    def test_ablation_result_flushed_to_csv(self, mock_ablation, tmp_path, sample_profile):
+        """After a successful ablation run, the result CSV must exist and
+        contain a row matching the config and seed."""
+        import csv
+        from scripts.run_one import execute_run
+
+        result_file = tmp_path / "ablation" / "D1_ablation_qwen7b_results.csv"
+        entry = _make_entry(stage="ablation", config="A3")
+        entry.result_file = str(result_file)
+
+        manifest = Manifest(mode="test", runs={entry.run_id: entry})
+        manifest_path = tmp_path / "manifest.json"
+        manifest.save(manifest_path)
+
+        mock_ablation.return_value = [_make_eval_result()]
+
+        execute_run(entry.run_id, manifest_path, sample_profile)
+
+        # The result CSV must exist
+        assert result_file.exists(), f"Result CSV not written at {result_file}"
+        # It must contain a data row for config=A3, seed=42
+        with open(result_file) as f:
+            rows = list(csv.DictReader(f))
+        assert len(rows) >= 1, "Result CSV has no data rows"
+        matching = [r for r in rows if r["config"] == "A3" and r["seed"] == "42"]
+        assert len(matching) == 1, f"Expected 1 row for A3/seed42, got {len(matching)}"
+        assert float(matching[0]["f1"]) == pytest.approx(0.82, abs=0.01)
+
+    @patch("scripts.run_one.run_ablation_stage")
+    def test_ablation_csv_appends_not_overwrites(self, mock_ablation, tmp_path, sample_profile):
+        """Two ablation runs with different seeds should both appear in the CSV."""
+        import csv
+        from scripts.run_one import execute_run
+
+        result_file = tmp_path / "ablation" / "D1_ablation_qwen7b_results.csv"
+
+        # First run: seed=42
+        entry1 = _make_entry(stage="ablation", config="A3",
+                             run_id="ablation__D1__A3__seed42__qwen7b")
+        entry1.result_file = str(result_file)
+        entry1.seed = 42
+        # Second run: seed=123
+        entry2 = _make_entry(stage="ablation", config="A3",
+                             run_id="ablation__D1__A3__seed123__qwen7b")
+        entry2.result_file = str(result_file)
+        entry2.seed = 123
+
+        manifest = Manifest(mode="test", runs={
+            entry1.run_id: entry1,
+            entry2.run_id: entry2,
+        })
+        manifest_path = tmp_path / "manifest.json"
+        manifest.save(manifest_path)
+
+        mock_ablation.return_value = [_make_eval_result(seed=42)]
+        execute_run(entry1.run_id, manifest_path, sample_profile)
+
+        mock_ablation.return_value = [_make_eval_result(seed=123)]
+        execute_run(entry2.run_id, manifest_path, sample_profile)
+
+        with open(result_file) as f:
+            rows = list(csv.DictReader(f))
+        assert len(rows) == 2, f"Expected 2 rows, got {len(rows)}"
+        seeds = {r["seed"] for r in rows}
+        assert seeds == {"42", "123"}
+
+    @patch("scripts.run_one.run_ablation_stage")
+    def test_baseline_result_flushed_to_csv(self, mock_ablation, tmp_path, sample_profile):
+        """Baseline ablation runs should also be flushed to CSV."""
+        import csv
+        from scripts.run_one import execute_run
+
+        result_file = tmp_path / "ablation" / "D1_ablation_qwen7b_results.csv"
+        entry = _make_entry(stage="ablation", config="baseline_bm25",
+                            run_id="ablation__D1__baseline_bm25__seed0__qwen7b")
+        entry.result_file = str(result_file)
+        entry.seed = 0
+
+        manifest = Manifest(mode="test", runs={entry.run_id: entry})
+        manifest_path = tmp_path / "manifest.json"
+        manifest.save(manifest_path)
+
+        mock_ablation.return_value = [_make_eval_result(config="baseline_bm25", seed=0)]
+
+        execute_run(entry.run_id, manifest_path, sample_profile)
+
+        assert result_file.exists()
+        with open(result_file) as f:
+            rows = list(csv.DictReader(f))
+        assert len(rows) >= 1
+        assert rows[0]["config"] == "baseline_bm25"
+
+    @patch("scripts.run_one.run_ablation_stage")
+    def test_no_csv_written_on_failure(self, mock_ablation, tmp_path, sample_profile):
+        """A failed ablation run should NOT create/modify the CSV."""
+        from scripts.run_one import execute_run
+
+        result_file = tmp_path / "ablation" / "D1_ablation_qwen7b_results.csv"
+        entry = _make_entry(stage="ablation", config="A3")
+        entry.result_file = str(result_file)
+
+        manifest = Manifest(mode="test", runs={entry.run_id: entry})
+        manifest_path = tmp_path / "manifest.json"
+        manifest.save(manifest_path)
+
+        mock_ablation.side_effect = RuntimeError("LLM timeout")
+
+        execute_run(entry.run_id, manifest_path, sample_profile)
+
+        assert not result_file.exists(), "CSV should not be created on failure"
+
+
 class TestExecutorManifestUpdates:
     """Verify manifest is updated on success and failure."""
 
