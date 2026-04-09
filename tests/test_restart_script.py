@@ -174,6 +174,24 @@ class TestRestartScript:
         assert "done" in result.stdout.lower()
         assert "pending" in result.stdout.lower()
 
+    def test_dry_run_reports_orphan_check(self, experiment_dir):
+        """Dry run checks for orphaned run_one.py processes."""
+        result = subprocess.run(
+            [
+                str(RESTART_SCRIPT),
+                "--dry-run",
+                "--mode", "full",
+                "--results-root", str(experiment_dir / "results"),
+                "--project-root", str(experiment_dir),
+            ],
+            capture_output=True,
+            text=True,
+            cwd=str(experiment_dir),
+        )
+        assert result.returncode == 0, f"stderr: {result.stderr}"
+        # Should mention checking for orphaned run_one.py processes
+        assert "run_one" in result.stdout.lower() or "orphan" in result.stdout.lower()
+
     def test_accepts_slot_args(self, experiment_dir):
         """Script accepts --api-slots and --ollama-slots."""
         result = subprocess.run(

@@ -13,9 +13,11 @@
 # Does NOT kill: ollama (system service — requires sudo)
 # =============================================================================
 
-LOGFILE="/var/nvme-cache/lloven/watchdog.log"
-THRESHOLD=30
-CHECK_INTERVAL=2
+LOGFILE="${WATCHDOG_LOG:-/var/nvme-cache/lloven/watchdog.log}"
+THRESHOLD="${WATCHDOG_THRESHOLD:-30}"
+# Frequent checks: cascade can go from load 0 to 20,000+ in <2 seconds.
+# 1s polling is the minimum that catches it before manual intervention is needed.
+CHECK_INTERVAL="${WATCHDOG_INTERVAL:-1}"
 
 echo "$(date): Watchdog started (PID $$, threshold=$THRESHOLD)" >> "$LOGFILE"
 
