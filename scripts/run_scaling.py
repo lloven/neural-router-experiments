@@ -304,6 +304,203 @@ def scale_subscriptions(dataset, embedder, llm_client, seed, output_dir, batch_s
     return pd.DataFrame(rows) if rows else pd.read_csv(path)
 
 
+SUB_COUNTS_DEFAULT = [50, 100, 200, 500, 1000, 2000, 5000]
+
+
+def generate_scaled_subscriptions(
+    subscriptions: list[Subscription],
+    target_count: int,
+    seed: int = 42,
+) -> list[Subscription]:
+    """Generate a subscription set of exactly *target_count* by subsampling or duplicating.
+
+    When target_count <= len(subscriptions), subsamples deterministically.
+    When target_count > len(subscriptions), duplicates existing subscriptions
+    with suffixed IDs to reach the target count.
+
+    Args:
+        subscriptions: Original subscription set.
+        target_count: Desired number of subscriptions.
+        seed: Random seed for deterministic subsampling.
+
+    Returns:
+        List of exactly target_count Subscription objects with unique IDs.
+    """
+    rng = np.random.RandomState(seed)
+    n = len(subscriptions)
+
+    if target_count <= n:
+        indices = rng.choice(n, target_count, replace=False)
+        return [subscriptions[i] for i in sorted(indices)]
+
+    # Duplicate: include all originals, then sample with replacement for the rest
+    result = list(subscriptions)
+    remaining = target_count - n
+    dup_indices = rng.choice(n, remaining, replace=True)
+    for dup_idx, orig_idx in enumerate(dup_indices):
+        orig = subscriptions[orig_idx]
+        result.append(Subscription(
+            id=f"{orig.id}_dup{dup_idx}",
+            name=f"{orig.name} (variant {dup_idx})",
+            description=orig.description,
+        ))
+    return result
+
+
+def scale_subscription_count(
+    dataset: Dataset,
+    embedder: EmbeddingModel,
+    llm_client,
+    seed: int,
+    output_dir: Path,
+    sub_counts: list[int] | None = None,
+    configs: list[str] | None = None,
+    batch_size: int = 200,
+    llm_timeout: int = 600,
+    progress_callback=None,
+) -> pd.DataFrame:
+    """Scale the number of subscriptions |S| while keeping events fixed, across configs.
+
+    For each (config, sub_count) pair, generates a scaled subscription set,
+    runs the router, and records F1, invocations, latency, and memory.
+
+    This is the Phase 1e subscription-count scaling experiment.
+
+    Args:
+        dataset: Full dataset (subscriptions are scaled from this).
+        embedder: Embedding model instance.
+        llm_client: LLM client (real or dry-run).
+        seed: Random seed.
+        output_dir: Directory for CSV output.
+        sub_counts: List of target subscription counts.
+        configs: List of ablation config names (e.g., ["A0", "A4"]).
+        batch_size: Max events per LLM call.
+        llm_timeout: Per-request timeout.
+        progress_callback: Optional callback(idx, total).
+
+    Returns:
+        DataFrame with one row per (config, sub_count).
+    """
+    import tracemalloc
+
+    sub_counts = sub_counts or SUB_COUNTS_DEFAULT
+    configs = configs or ["A0", "A4"]
+
+    path = output_dir / f"scaling_subs_count_{dataset.short_name}.csv"
+    done = _load_completed_values(path, "n_subscriptions")
+    # We need to check (config, n_subs) pairs
+    done_pairs: set[tuple[str, str]] = set()
+    if path.exists():
+        try:
+            existing_df = pd.read_csv(path)
+            for _, row in existing_df.iterrows():
+                done_pairs.add((str(row["config"]), str(row["n_subscriptions"])))
+        except Exception:
+            pass
+
+    rows = []
+    total_points = len(configs) * len(sub_counts)
+    idx = 0
+
+    for config_name in configs:
+        for n_subs in sub_counts:
+            if (config_name, str(n_subs)) in done_pairs:
+                logger.info(f"Sub scaling: {config_name} |S|={n_subs} already done, skipping")
+                idx += 1
+                continue
+
+            # Generate scaled subscription set
+            scaled_subs = generate_scaled_subscriptions(
+                dataset.subscriptions, n_subs, seed=seed
+            )
+
+            sub_dataset = Dataset(
+                name=dataset.name,
+                short_name=dataset.short_name,
+                events=dataset.events,
+                subscriptions=scaled_subs,
+                metadata=dataset.metadata,
+            )
+
+            logger.info(f"Sub scaling: {config_name} |S|={n_subs}")
+            if hasattr(llm_client, 'reset_stats'):
+                llm_client.reset_stats()
+
+            model_overrides = {}
+            if "ollama" in llm_client.model.lower():
+                model_overrides["max_parallel"] = 1
+                model_overrides["use_async"] = False
+            if "claude-3-haiku" in llm_client.model.lower():
+                model_overrides["llm_max_tokens"] = 4096
+                model_overrides["max_parallel"] = 2
+
+            base_config = ABLATION_CONFIGS[config_name]
+            k = min(max(1, n_subs // 2), 30) if base_config.use_clustering else 1
+
+            config = RouterConfig(**{
+                **base_config.__dict__,
+                "seed": seed,
+                "k": k,
+                "kappa": 3,
+                "llm_model": llm_client.model,
+                "max_batch_events": batch_size,
+                "llm_timeout": llm_timeout,
+                **model_overrides,
+            })
+
+            router = NeuralRouter(config=config, llm_client=llm_client, embedding_model=embedder)
+
+            # Track memory
+            tracemalloc.start()
+            t0 = time.time()
+            router.optimize_subscriptions(sub_dataset.subscriptions)
+            matches = router.match_events(sub_dataset.events)
+            wall_time = time.time() - t0
+            current_mem, peak_mem = tracemalloc.get_traced_memory()
+            tracemalloc.stop()
+
+            result = evaluate_matches(
+                matches=matches,
+                dataset=sub_dataset,
+                config_name=f"{config_name}_S{n_subs}",
+                seed=seed,
+                router_stats=router.stats,
+            )
+
+            row = {
+                "config": config_name,
+                "n_subscriptions": n_subs,
+                "n_events": dataset.num_events,
+                "f1": result.f1.mean,
+                "precision": result.precision.mean,
+                "recall": result.recall.mean,
+                "invocations": result.invocations,
+                "compression_ratio": result.compression_ratio,
+                "latency_s": wall_time,
+                "memory_mb": peak_mem / (1024 * 1024),
+                "tokens_prompt": result.tokens_prompt,
+                "tokens_response": result.tokens_response,
+                "cost_per_1k": result.cost_per_1k,
+            }
+            rows.append(row)
+            _append_row(row, path)
+            logger.info(
+                f"  {config_name} |S|={n_subs}: F1={result.f1.mean:.4f}, "
+                f"lat={wall_time:.0f}s, mem={peak_mem/(1024*1024):.1f}MB"
+            )
+
+            idx += 1
+            if progress_callback:
+                progress_callback(idx=idx, total=total_points)
+
+    logger.info(f"Saved to {path} ({len(rows)} new rows)")
+    if rows:
+        return pd.DataFrame(rows)
+    elif path.exists():
+        return pd.read_csv(path)
+    return pd.DataFrame()
+
+
 def run_scaling_stage(
     entry: RunEntry,
     profile: dict,
@@ -343,6 +540,15 @@ def run_scaling_stage(
             batch_size=batch_size, llm_timeout=llm_timeout,
             event_counts=event_counts,
         )
+    elif config_str.startswith("scale_subs_count"):
+        p_scale = profile.get("scaling", {})
+        sub_count_configs = p_scale.get("sub_count_configs", ["A0", "A4"])
+        scale_subscription_count(
+            dataset, embedding_model, llm_client, entry.seed, output_dir,
+            sub_counts=event_counts,  # reuse event_counts as sub_counts
+            configs=sub_count_configs,
+            batch_size=batch_size, llm_timeout=llm_timeout,
+        )
     elif config_str.startswith("scale_subs"):
         scale_subscriptions(
             dataset, embedding_model, llm_client, entry.seed, output_dir,
@@ -356,7 +562,7 @@ def parse_args():
     parser = argparse.ArgumentParser(description="Scaling analysis")
     parser.add_argument("--dataset", type=str, default="D1")
     parser.add_argument("--dimension", type=str, default="all",
-                        help="events, subscriptions, or all")
+                        help="events, subscriptions, sub_count, or all")
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--llm-model", type=str, default="gpt-4o-mini")
     parser.add_argument("--dry-run", action="store_true")
@@ -414,7 +620,7 @@ def main():
 
     embedder = EmbeddingModel("all-MiniLM-L6-v2", cache_dir=args.cache_dir)
 
-    dims = args.dimension.lower().split(",") if args.dimension.lower() != "all" else ["events", "subscriptions"]
+    dims = args.dimension.lower().split(",") if args.dimension.lower() != "all" else ["events", "subscriptions", "sub_count"]
 
     # Progress tracking
     model_key = args.llm_model.split("/")[-1].split(":")[0]
@@ -450,6 +656,10 @@ def main():
             scale_events(dataset, embedder, llm_client, args.seed, output_dir, batch_size=batch_size, llm_timeout=llm_timeout, event_counts=event_counts, progress_callback=on_scale_progress)
         elif dim == "subscriptions":
             scale_subscriptions(dataset, embedder, llm_client, args.seed, output_dir, batch_size=batch_size, llm_timeout=llm_timeout, progress_callback=on_scale_progress)
+        elif dim == "sub_count":
+            p_scale = profile.get("scaling", {}) if profile else {}
+            sub_count_configs = p_scale.get("sub_count_configs", ["A0", "A4"])
+            scale_subscription_count(dataset, embedder, llm_client, args.seed, output_dir, sub_counts=event_counts, configs=sub_count_configs, batch_size=batch_size, llm_timeout=llm_timeout, progress_callback=on_scale_progress)
 
         tracker.finish()
 

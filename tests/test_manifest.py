@@ -203,23 +203,37 @@ def test_generate_runs_produces_correct_count(full_profile: dict):
     for r in runs:
         by_model.setdefault(r.model_key, []).append(r)
 
-    # Ablation: datasets(3) * [configs(7) * seeds + baselines(6)]
-    # qwen7b/haiku: 3 * (7*5 + 6) = 3*41 = 123
-    # sonnet: 3 * (7*1 + 6) = 3*13 = 39
+    # Ablation: datasets(3) * [configs(7) * seeds + baselines(7)]
+    # qwen7b/haiku: 3 * (7*5 + 7) = 3*42 = 126
+    # sonnet: 3 * (7*1 + 7) = 3*14 = 42
     abl_qwen = [r for r in by_model.get("qwen7b", []) if r.stage == "ablation"]
     abl_sonnet = [r for r in by_model.get("sonnet", []) if r.stage == "ablation"]
-    assert len(abl_qwen) == 123, f"qwen7b ablation: expected 123, got {len(abl_qwen)}"
-    assert len(abl_sonnet) == 39, f"sonnet ablation: expected 39, got {len(abl_sonnet)}"
+    assert len(abl_qwen) == 126, f"qwen7b ablation: expected 126, got {len(abl_qwen)}"
+    assert len(abl_sonnet) == 42, f"sonnet ablation: expected 42, got {len(abl_sonnet)}"
 
     # Sensitivity: 4 sweeps * 3 datasets = 12 per model
     sens_qwen = [r for r in by_model.get("qwen7b", []) if r.stage == "sensitivity"]
     assert len(sens_qwen) == 12, f"qwen7b sensitivity: expected 12, got {len(sens_qwen)}"
 
-    # Scaling: 7 event_counts * 2 datasets (D2, D3) = 14 per model
-    scl_qwen = [r for r in by_model.get("qwen7b", []) if r.stage == "scaling"]
-    assert len(scl_qwen) == 14, f"qwen7b scaling: expected 14, got {len(scl_qwen)}"
+    # Scaling: 7 event_counts * 2 datasets (D2, D3) = 14 event-scaling runs per model
+    # Plus 1 sub-count scaling run (from scaling_subs config, qwen7b only)
+    scl_qwen = [r for r in by_model.get("qwen7b", []) if r.stage == "scaling" and "scale_events" in r.config]
+    assert len(scl_qwen) == 14, f"qwen7b event scaling: expected 14, got {len(scl_qwen)}"
 
-    expected_total = 149 + 149 + 65
+    # New stages from top-level config sections:
+    # crossover: 1 run (D1, qwen7b)
+    # qoe: 3 runs (D1, D2, D3, qwen7b)
+    # scaling_subs: 1 run (D1, qwen7b)
+    crossover_runs = [r for r in runs if r.stage == "crossover"]
+    qoe_runs = [r for r in runs if r.stage == "qoe"]
+    subs_count_runs = [r for r in runs if r.stage == "scaling" and "scale_subs_count" in r.config]
+
+    assert len(crossover_runs) == 1, f"Expected 1 crossover run, got {len(crossover_runs)}"
+    assert len(qoe_runs) == 3, f"Expected 3 QoE runs, got {len(qoe_runs)}"
+    assert len(subs_count_runs) == 1, f"Expected 1 sub-count scaling run, got {len(subs_count_runs)}"
+
+    # Total: ablation(294) + sensitivity(36) + scaling(43) + crossover(1) + qoe(3) = 377
+    expected_total = 377
     assert len(runs) == expected_total, f"Expected {expected_total}, got {len(runs)}"
 
 
