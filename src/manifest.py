@@ -17,6 +17,7 @@ from src.config import (
     get_model_max_events_override,
     get_model_seed_override,
     get_model_stages,
+    load_params,
 )
 
 
@@ -145,7 +146,7 @@ class SlotPool:
         return len(active) < maximum
 
 
-_STAGE_ORDER = {"ablation": 0, "sensitivity": 1, "scaling": 2}
+_STAGE_ORDER = {"ablation": 0, "sensitivity": 1, "scaling": 2, "crossover": 3, "qoe": 4}
 
 
 def sort_by_priority(runs: list[RunEntry]) -> list[RunEntry]:
@@ -291,6 +292,120 @@ def generate_runs(profile: dict[str, Any]) -> list[RunEntry]:
                         result_file=f"results/{mode}/scaling/{model_key}/scaling_events_{ds}.csv",
                         metrics=None,
                     ))
+
+    # -- New experiment stages (Phase 1c-1e) ----------------------------------
+    # These are generated from top-level params.yaml sections, not per-model.
+    # They use specific model/dataset combos from their own config.
+
+    try:
+        params = load_params()
+    except FileNotFoundError:
+        params = {}
+
+    # Phase 1c: Crossover validation
+    crossover_cfg = params.get("crossover", {})
+    if crossover_cfg:
+        ds = crossover_cfg.get("dataset", "D1")
+        # Use the first available ollama model for crossover (GPU-local)
+        crossover_model_key = None
+        crossover_model_id = None
+        for mk, mi in models.items():
+            if "ollama" in mi["id"]:
+                crossover_model_key = mk
+                crossover_model_id = mi["id"]
+                break
+        if crossover_model_key is None and models:
+            crossover_model_key = next(iter(models))
+            crossover_model_id = models[crossover_model_key]["id"]
+
+        if crossover_model_key:
+            slot = _slot_type(crossover_model_id)
+            rid = f"crossover__{ds}__crossover__seed0__{crossover_model_key}"
+            runs.append(RunEntry(
+                run_id=rid,
+                stage="crossover",
+                dataset=ds,
+                model_key=crossover_model_key,
+                model_id=crossover_model_id,
+                config="crossover",
+                seed=0,
+                status="pending",
+                slot_type=slot,
+                max_events=None,
+                max_event_words=None,
+                started_at=None,
+                finished_at=None,
+                error=None,
+                result_file=f"results/{mode}/crossover/crossover_{ds}.csv",
+                metrics=None,
+            ))
+
+    # Phase 1d: QoE routing
+    qoe_cfg = params.get("qoe", {})
+    if qoe_cfg:
+        qoe_datasets = qoe_cfg.get("datasets", ["D1", "D2", "D3"])
+        # QoE uses the first model as the orchestration model
+        qoe_model_key = next(iter(models)) if models else None
+        if qoe_model_key:
+            qoe_model_id = models[qoe_model_key]["id"]
+            slot = _slot_type(qoe_model_id)
+            for qds in qoe_datasets:
+                rid = f"qoe__{qds}__qoe__seed0__{qoe_model_key}"
+                runs.append(RunEntry(
+                    run_id=rid,
+                    stage="qoe",
+                    dataset=qds,
+                    model_key=qoe_model_key,
+                    model_id=qoe_model_id,
+                    config="qoe",
+                    seed=0,
+                    status="pending",
+                    slot_type=slot,
+                    max_events=None,
+                    max_event_words=None,
+                    started_at=None,
+                    finished_at=None,
+                    error=None,
+                    result_file=f"results/{mode}/qoe/qoe_{qds}.csv",
+                    metrics=None,
+                ))
+
+    # Phase 1e: Subscription-count scaling
+    scaling_subs_cfg = params.get("scaling_subs", {})
+    if scaling_subs_cfg:
+        ds = scaling_subs_cfg.get("dataset", "D1")
+        backend_id = scaling_subs_cfg.get("backend", "ollama/qwen2.5:7b")
+        # Find the model key matching this backend
+        sc_model_key = None
+        for mk, mi in models.items():
+            if mi["id"] == backend_id:
+                sc_model_key = mk
+                break
+        if sc_model_key is None and models:
+            sc_model_key = next(iter(models))
+            backend_id = models[sc_model_key]["id"]
+
+        if sc_model_key:
+            slot = _slot_type(backend_id)
+            rid = f"scaling__{ds}__scale_subs_count__seed0__{sc_model_key}"
+            runs.append(RunEntry(
+                run_id=rid,
+                stage="scaling",
+                dataset=ds,
+                model_key=sc_model_key,
+                model_id=backend_id,
+                config="scale_subs_count",
+                seed=0,
+                status="pending",
+                slot_type=slot,
+                max_events=None,
+                max_event_words=None,
+                started_at=None,
+                finished_at=None,
+                error=None,
+                result_file=f"results/{mode}/scaling/{sc_model_key}/scaling_subs_count_{ds}.csv",
+                metrics=None,
+            ))
 
     return runs
 
