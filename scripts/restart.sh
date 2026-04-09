@@ -73,10 +73,12 @@ echo ""
 # ---------------------------------------------------------------------------
 # Step 1: Kill stale orchestrator processes
 # ---------------------------------------------------------------------------
-echo "--- Step 1: Checking for stale orchestrator processes ---"
+echo "--- Step 1: Checking for stale processes ---"
+
+# Kill orchestrator processes
 STALE_PIDS=$(pgrep -f "run_all.py" 2>/dev/null || true)
 if [[ -n "$STALE_PIDS" ]]; then
-    echo "Found stale PIDs: $STALE_PIDS"
+    echo "Found stale orchestrator PIDs: $STALE_PIDS"
     if [[ "$DRY_RUN" == "false" ]]; then
         for pid in $STALE_PIDS; do
             echo "  Killing PID $pid"
@@ -87,7 +89,25 @@ if [[ -n "$STALE_PIDS" ]]; then
         echo "  (dry-run: would kill these PIDs)"
     fi
 else
-    echo "  No stale processes found."
+    echo "  No stale orchestrator processes found."
+fi
+
+# Kill orphaned run_one.py children (survive parent kill, can cause
+# multiple concurrent Qwen runs which OOM the laptop)
+ORPHAN_PIDS=$(pgrep -f "run_one.py" 2>/dev/null || true)
+if [[ -n "$ORPHAN_PIDS" ]]; then
+    echo "Found orphaned run_one.py PIDs: $ORPHAN_PIDS"
+    if [[ "$DRY_RUN" == "false" ]]; then
+        for pid in $ORPHAN_PIDS; do
+            echo "  Killing PID $pid"
+            kill "$pid" 2>/dev/null || true
+        done
+        sleep 1
+    else
+        echo "  (dry-run: would kill these PIDs)"
+    fi
+else
+    echo "  No orphaned run_one.py processes found."
 fi
 
 # ---------------------------------------------------------------------------
@@ -111,8 +131,10 @@ done = sum(1 for r in runs if r.status == 'done')
 failed = sum(1 for r in runs if r.status == 'failed')
 pending = sum(1 for r in runs if r.status == 'pending')
 running = sum(1 for r in runs if r.status == 'running')
+skipped = sum(1 for r in runs if r.status == 'skipped')
 total = len(m.runs)
-print(f'{done} done, {pending} pending, {failed} failed, {running} running (total {total})')
+skip_str = f', {skipped} skipped' if skipped else ''
+print(f'{done} done, {pending} pending, {failed} failed, {running} running{skip_str} (total {total})')
 ")
     echo "  Before: $STATE_BEFORE"
 
@@ -143,8 +165,10 @@ done = sum(1 for r in runs if r.status == 'done')
 failed = sum(1 for r in runs if r.status == 'failed')
 pending = sum(1 for r in runs if r.status == 'pending')
 running = sum(1 for r in runs if r.status == 'running')
+skipped = sum(1 for r in runs if r.status == 'skipped')
 total = len(m.runs)
-print(f'{done} done, {pending} pending, {failed} failed, {running} running (total {total})')
+skip_str = f', {skipped} skipped' if skipped else ''
+print(f'{done} done, {pending} pending, {failed} failed, {running} running{skip_str} (total {total})')
 ")
     echo "  After:  $STATE_AFTER"
 fi

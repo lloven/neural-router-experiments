@@ -38,29 +38,36 @@ while true; do
         esac
     done < /proc/stat
 
-    # 4. Python count + ppids
+    # 4. Python count + ppids (SKIP when load > 10 to avoid amplifying cascades)
     python_count=0
     python_ppids=""
-    for comm_file in /proc/[0-9]*/comm; do
-        read -r cmd < "$comm_file" 2>/dev/null || continue
-        case "$cmd" in
-            python|python3)
-                python_count=$((python_count + 1))
-                pid_dir="${comm_file%/comm}"
-                read -r stat_line < "${pid_dir}/stat" 2>/dev/null || continue
-                stat_after="${stat_line##*) }"
-                read -r _state ppid _rest <<< "$stat_after"
-                if [ -n "$python_ppids" ]; then
-                    python_ppids="${python_ppids},${ppid}"
-                else
-                    python_ppids="${ppid}"
-                fi
+    load_int=${load_1m%.*}
+    if [ "${load_int:-0}" -lt 10 ]; then
+        for comm_file in /proc/[0-9]*/comm; do
+            read -r cmd < "$comm_file" 2>/dev/null || continue
+            case "$cmd" in
+                python|python3)
+                    python_count=$((python_count + 1))
+                    pid_dir="${comm_file%/comm}"
+                    read -r stat_line < "${pid_dir}/stat" 2>/dev/null || continue
+                    stat_after="${stat_line##*) }"
+                    read -r _state ppid _rest <<< "$stat_after"
+                    if [ -n "$python_ppids" ]; then
+                        python_ppids="${python_ppids},${ppid}"
+                    else
+                        python_ppids="${ppid}"
+                    fi
                 ;;
-        esac
-    done
+            esac
+        done
+    else
+        python_count=-1  # -1 signals "skipped due to high load"
+    fi
     ppids_json="[${python_ppids}]"
 
-    # 5. NFS ops (from mountstats)
+    # 5. NFS ops (from mountstats) — also skip under high load
+    nfs_ops=-1
+    if [ "${load_int:-0}" -lt 10 ]; then
     nfs_ops=0
     in_nfs=0
     while IFS= read -r line; do
@@ -74,10 +81,11 @@ while true; do
                 ;;
         esac
     done < /proc/self/mountstats 2>/dev/null
+    fi
 
-    # 6. GPU (low frequency fork)
+    # 6. GPU (low frequency fork) — skip under high load
     iteration=$((iteration + 1))
-    if [ $((iteration % GPU_INTERVAL)) -eq 0 ]; then
+    if [ "${load_int:-0}" -lt 10 ] && [ $((iteration % GPU_INTERVAL)) -eq 0 ]; then
         gpu_out=$(timeout 3 nvidia-smi --query-gpu=memory.used,utilization.gpu --format=csv,noheader,nounits 2>/dev/null)
         if [ $? -eq 0 ] && [ -n "$gpu_out" ]; then
             IFS=', ' read -r gpu_mem_mb gpu_util_pct <<< "$gpu_out"
