@@ -27,9 +27,11 @@ load_dotenv(Path(__file__).resolve().parent.parent / ".env", override=True)
 # Add parent directory to path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from scripts.run_experiment import run_ablation_stage
+from scripts.run_experiment import flush_result, run_ablation_stage
 from scripts.run_sensitivity import run_sensitivity_stage
 from scripts.run_scaling import run_scaling_stage
+from scripts.run_crossover import run_crossover_stage
+from scripts.run_qoe import run_qoe_stage
 from src.config import load_profile
 from src.embeddings import EmbeddingModel
 from src.llm import LLMClient
@@ -112,8 +114,29 @@ def execute_run(
                 progress_tracker=progress,
             )
             results = None
+        elif entry.stage == "crossover":
+            run_crossover_stage(
+                entry=entry, profile=profile,
+                llm_client=llm_client, embedding_model=embedding_model,
+                progress_tracker=progress,
+            )
+            results = None
+        elif entry.stage == "qoe":
+            run_qoe_stage(
+                entry=entry, profile=profile,
+                llm_client=llm_client, embedding_model=embedding_model,
+                progress_tracker=progress,
+            )
+            results = None
         else:
             raise ValueError(f"Unknown stage: {entry.stage}")
+
+        # Flush ablation results to CSV so entry.result_file exists on disk
+        if entry.stage == "ablation" and results:
+            output_dir = Path(entry.result_file).parent
+            prefix = Path(entry.result_file).stem.removesuffix("_results")
+            for r in results:
+                flush_result(r, output_dir, prefix)
 
         # Extract metrics from ablation results
         metrics = None
