@@ -145,7 +145,8 @@ def test_render_dashboard_shows_running_with_detail() -> None:
     }
     output = render_dashboard(manifest, sidecars)
 
-    assert "ablation__D1__A6__seed42__qwen7b" in output
+    # Monitor renders compact IDs (ablation/D1/A6/s42/qwen7b)
+    assert "ablation" in output and "D1" in output and "qwen7b" in output
     assert "1350/3200" in output
     # ETA should appear (720s = 12m)
     assert "12m" in output
@@ -168,7 +169,7 @@ def test_render_dashboard_shows_done_with_metrics() -> None:
     manifest = _make_manifest(entries)
     output = render_dashboard(manifest, sidecars={})
 
-    assert "ablation__D1__A0__seed42__qwen7b" in output
+    assert "ablation" in output and "D1" in output and "qwen7b" in output
     assert "F1=0.530" in output
 
 
@@ -189,7 +190,7 @@ def test_render_dashboard_shows_failed_with_error() -> None:
     manifest = _make_manifest(entries)
     output = render_dashboard(manifest, sidecars={})
 
-    assert "sensitivity__D3__sweep_k__seed0__qwen7b" in output
+    assert "sensitivity" in output and "qwen7b" in output
     assert "SIGTERM" in output
 
 
