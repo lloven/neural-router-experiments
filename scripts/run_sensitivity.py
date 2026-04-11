@@ -320,6 +320,7 @@ def run_sensitivity_stage(
     )
 
     output_dir = Path(entry.result_file).parent
+    output_dir.mkdir(parents=True, exist_ok=True)
 
     p_sens = profile.get("sensitivity", {})
     seeds = [entry.seed]

@@ -528,6 +528,7 @@ def run_scaling_stage(
     dataset = load_dataset_by_name(entry.dataset, cache_dir="data")
 
     output_dir = Path(entry.result_file).parent
+    output_dir.mkdir(parents=True, exist_ok=True)
 
     p_scale = profile.get("scaling", {})
     event_counts = p_scale.get("event_counts", EVENT_COUNTS_DEFAULT)
