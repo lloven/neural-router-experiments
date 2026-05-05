@@ -97,7 +97,7 @@ walltime is more than enough for D2 at full corpus on A100s.
 
 Symptoms (2026-04-07 to 2026-04-09): Python imports hung on `.pyc` writes
 because the container disk was full; NFS retries piled up, load average
-spiked into the thousands, processes wedged. Diagnosis from local-infra-admin
+spiked into the thousands, processes wedged. Diagnosis from local infra admin
 2026-04-09 — disk-full container, not vGPU/NFS as initially suspected.
 
 The `scripts/remote/{check-vm,deploy,run-experiments,setup-vm}.sh` family
