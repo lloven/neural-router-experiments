@@ -160,11 +160,31 @@ def assign_round_robin(
     }
 
 
+def _minmax(values: list[float], invert: bool = False) -> list[float]:
+    """Scale values to [0, 1]. Constant inputs map to all 0.5 (no preference).
+
+    `invert=True` flips the scale (used for cost and latency, where lower
+    is better).
+    """
+    lo, hi = min(values), max(values)
+    if hi - lo < 1e-12:
+        return [0.5 for _ in values]
+    scaled = [(v - lo) / (hi - lo) for v in values]
+    return [1.0 - s for s in scaled] if invert else scaled
+
+
 def assign_qoe_optimised(
     calibration: CalibrationResult,
     weights: dict[str, float],
 ) -> dict[int, str]:
     """Assign each cluster to the backend with the highest QoE score.
+
+    Per-cluster min-max normalisation: F1, cost, and latency are each
+    scaled to [0, 1] across the candidate backends *for that cluster*
+    before weighting. This replaces the earlier hardcoded
+    `cost_max=20.0` / `latency_max=30.0` constants that saturated the
+    cost and latency terms for self-hosted-model deployments
+    (cancelled job 6620413; see L63 / OPERATIONS_LOG B62).
 
     Args:
         calibration: Calibration results from the calibration phase.
@@ -173,23 +193,30 @@ def assign_qoe_optimised(
     Returns:
         Dict mapping cluster_id to the best backend.
     """
+    w_acc = weights.get("accuracy", 0.34)
+    w_cost = weights.get("cost", 0.33)
+    w_lat = weights.get("latency", 0.33)
+
     assignment: dict[int, str] = {}
     for cluster_id in calibration.cluster_ids():
-        best_backend = None
-        best_score = -1.0
-        for backend in calibration.backends_for_cluster(cluster_id):
-            metrics = calibration.get(cluster_id, backend)
-            score = compute_qoe_score(
-                f1=metrics["f1"],
-                cost=metrics["cost"],
-                latency=metrics["latency"],
-                weights=weights,
-            )
-            if score > best_score:
-                best_score = score
-                best_backend = backend
-        if best_backend is not None:
-            assignment[cluster_id] = best_backend
+        backends = calibration.backends_for_cluster(cluster_id)
+        if not backends:
+            continue
+
+        f1s = [calibration.get(cluster_id, b)["f1"] for b in backends]
+        costs = [calibration.get(cluster_id, b)["cost"] for b in backends]
+        lats = [calibration.get(cluster_id, b)["latency"] for b in backends]
+
+        f1_n = _minmax(f1s)
+        cost_n = _minmax(costs, invert=True)
+        lat_n = _minmax(lats, invert=True)
+
+        scores = [
+            w_acc * f1_n[i] + w_cost * cost_n[i] + w_lat * lat_n[i]
+            for i in range(len(backends))
+        ]
+        best_idx = max(range(len(backends)), key=lambda i: scores[i])
+        assignment[cluster_id] = backends[best_idx]
     return assignment
 
 
