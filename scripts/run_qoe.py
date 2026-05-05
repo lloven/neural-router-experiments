@@ -66,6 +66,26 @@ def _append_row(row: dict, path: Path):
     df.to_csv(path, mode="a", header=write_header, index=False)
 
 
+def _write_progress(output_dir: Path, payload: dict) -> None:
+    """L63: per-batch progress writer. Atomic write to .progress.json so
+    a mid-run reader sees a consistent snapshot.
+
+    Writes through a tmp file + rename so partial writes are never visible.
+    """
+    import json, os, tempfile, time
+    output_dir.mkdir(parents=True, exist_ok=True)
+    payload = {**payload, "ts": time.time()}
+    p = output_dir / ".progress.json"
+    fd, tmp = tempfile.mkstemp(prefix=".progress_", suffix=".tmp", dir=str(output_dir))
+    try:
+        with os.fdopen(fd, "w") as f:
+            json.dump(payload, f, indent=2, default=str)
+        os.replace(tmp, p)
+    except Exception:
+        try: os.unlink(tmp)
+        except Exception: pass
+
+
 def _run_with_assignment(
     dataset: Dataset,
     clusters: list,
@@ -234,6 +254,21 @@ def run_qoe_experiment(
     csv_path = output_dir / f"qoe_{dataset.short_name}.csv"
     rows = []
 
+    # L63: estimate total cells for the progress reporter
+    n_homogeneous = len(backend_names) if "homogeneous" in strategies else 0
+    n_round_robin = 1 if "round_robin" in strategies else 0
+    n_qoe = len(weight_presets) if "qoe_optimised" in strategies else 0
+    cells_per_seed = n_homogeneous + n_round_robin + n_qoe
+    total_cells = cells_per_seed * len(seeds)
+    completed_cells = 0
+
+    _write_progress(output_dir, {
+        "phase": "starting", "completed_cells": 0, "total_cells": total_cells,
+        "n_seeds": len(seeds), "cells_per_seed": cells_per_seed,
+        "strategies": strategies, "weight_presets": weight_presets,
+        "backends": backend_names,
+    })
+
     for seed in seeds:
         # Optimise subscriptions once per seed (using A3 config)
         # Use the first available backend for clustering
@@ -253,6 +288,10 @@ def run_qoe_experiment(
             if strategy == "homogeneous":
                 # Run once per backend
                 for backend_name in backend_names:
+                    _write_progress(output_dir, {
+                        "phase": "running", "cell": f"homogeneous/{backend_name}/seed{seed}",
+                        "completed_cells": completed_cells, "total_cells": total_cells,
+                    })
                     assignment = assign_homogeneous(clusters, backend_name)
                     metrics = _run_with_assignment(
                         dataset, clusters, assignment, llm_clients, embedder, seed,
@@ -268,12 +307,25 @@ def run_qoe_experiment(
                     }
                     rows.append(row)
                     _append_row(row, csv_path)
+                    completed_cells += 1
+                    _write_progress(output_dir, {
+                        "phase": "cell_done",
+                        "cell": f"homogeneous/{backend_name}/seed{seed}",
+                        "completed_cells": completed_cells, "total_cells": total_cells,
+                        "last_f1": metrics["f1"], "last_cost": metrics["cost_per_1k"],
+                        "last_latency_s": metrics.get("latency_s"),
+                    })
                     logger.info(
                         f"  homogeneous/{backend_name} seed={seed}: "
-                        f"F1={metrics['f1']:.4f}, cost={metrics['cost_per_1k']:.4f}"
+                        f"F1={metrics['f1']:.4f}, cost={metrics['cost_per_1k']:.4f} "
+                        f"({completed_cells}/{total_cells} cells)"
                     )
 
             elif strategy == "round_robin":
+                _write_progress(output_dir, {
+                    "phase": "running", "cell": f"round_robin/seed{seed}",
+                    "completed_cells": completed_cells, "total_cells": total_cells,
+                })
                 assignment = assign_round_robin(clusters, backend_names)
                 metrics = _run_with_assignment(
                     dataset, clusters, assignment, llm_clients, embedder, seed,
@@ -289,13 +341,25 @@ def run_qoe_experiment(
                 }
                 rows.append(row)
                 _append_row(row, csv_path)
+                completed_cells += 1
+                _write_progress(output_dir, {
+                    "phase": "cell_done", "cell": f"round_robin/seed{seed}",
+                    "completed_cells": completed_cells, "total_cells": total_cells,
+                    "last_f1": metrics["f1"], "last_cost": metrics["cost_per_1k"],
+                    "last_latency_s": metrics.get("latency_s"),
+                })
                 logger.info(
                     f"  round_robin seed={seed}: "
-                    f"F1={metrics['f1']:.4f}, cost={metrics['cost_per_1k']:.4f}"
+                    f"F1={metrics['f1']:.4f}, cost={metrics['cost_per_1k']:.4f} "
+                    f"({completed_cells}/{total_cells} cells)"
                 )
 
             elif strategy == "qoe_optimised":
-                # Calibrate first
+                _write_progress(output_dir, {
+                    "phase": "calibrating",
+                    "cell": f"qoe_optimised/calibration/seed{seed}",
+                    "completed_cells": completed_cells, "total_cells": total_cells,
+                })
                 assigner = QoEAssigner(
                     clusters=clusters,
                     backends=backend_names,
@@ -309,6 +373,11 @@ def run_qoe_experiment(
 
                 # Run with each weight preset
                 for preset_name in weight_presets:
+                    _write_progress(output_dir, {
+                        "phase": "running",
+                        "cell": f"qoe_optimised/{preset_name}/seed{seed}",
+                        "completed_cells": completed_cells, "total_cells": total_cells,
+                    })
                     weights = QOE_WEIGHT_PRESETS[preset_name]
                     assigner.weights = weights
                     assignment = assigner.assign(strategy="qoe_optimised")
@@ -327,10 +396,24 @@ def run_qoe_experiment(
                     }
                     rows.append(row)
                     _append_row(row, csv_path)
+                    completed_cells += 1
+                    _write_progress(output_dir, {
+                        "phase": "cell_done",
+                        "cell": f"qoe_optimised/{preset_name}/seed{seed}",
+                        "completed_cells": completed_cells, "total_cells": total_cells,
+                        "last_f1": metrics["f1"], "last_cost": metrics["cost_per_1k"],
+                        "last_latency_s": metrics.get("latency_s"),
+                        "assignment": str(assignment),
+                    })
                     logger.info(
                         f"  qoe_optimised/{preset_name} seed={seed}: "
-                        f"F1={metrics['f1']:.4f}, cost={metrics['cost_per_1k']:.4f}"
+                        f"F1={metrics['f1']:.4f}, cost={metrics['cost_per_1k']:.4f} "
+                        f"({completed_cells}/{total_cells} cells)"
                     )
+
+    _write_progress(output_dir, {
+        "phase": "done", "completed_cells": completed_cells, "total_cells": total_cells,
+    })
 
     if csv_path.exists():
         return pd.read_csv(csv_path)
@@ -389,6 +472,11 @@ def parse_args():
     parser.add_argument("--output-dir", type=str, default="results")
     parser.add_argument("--cache-dir", type=str, default="data")
     parser.add_argument("--mode", type=str, default=None)
+    parser.add_argument(
+        "--max-events", type=int, default=None,
+        help="Truncate the dataset to this many events for L23 smoke runs. "
+             "Default: full corpus.",
+    )
     return parser.parse_args()
 
 
@@ -409,6 +497,10 @@ def main():
     output_dir.mkdir(parents=True, exist_ok=True)
 
     dataset = load_dataset_by_name(args.dataset, cache_dir=args.cache_dir)
+    if args.max_events is not None and args.max_events < len(dataset.events):
+        logger.info("Truncating dataset to --max-events=%d (was %d)",
+                    args.max_events, len(dataset.events))
+        dataset.events = dataset.events[: args.max_events]
     logger.info(dataset.summary())
 
     embedder = EmbeddingModel("all-MiniLM-L6-v2", cache_dir=args.cache_dir)
