@@ -3,8 +3,8 @@
 ## Status (2026-04-29)
 
 The Qwen track runs on **CSC** (project `project_2018951`). The earlier FCG
-vGPU desktop track is **dropped** — those VMs (`vgpudesktop6/9/10`) crashed
-with container disk-full issues in early April 2026 (Jani diagnosis
+vGPU desktop track is **dropped** — those VMs (`vgpu-host/9/10`) crashed
+with container disk-full issues in early April 2026 (local-infra-admin diagnosis
 2026-04-09) and are not maintained for this campaign.
 
 Anthropic API runs (Haiku, Sonnet) continue to run from the laptop or the
@@ -91,13 +91,13 @@ walltime is more than enough for D2 at full corpus on A100s.
 
 | Host | SSH alias | GPU | Status |
 |---|---|---|---|
-| vgpudesktop6 | `nrouter-vm0` | RTX 2080 Ti | Disk-full / crashing |
-| vgpudesktop9 | `nrouter-vm1` | RTX 2080 Ti | BLOCKED on Python |
-| vgpudesktop10 | `nrouter-vm2` | RTX 2080 Ti | UNREACHABLE |
+| vgpu-host | `nrouter-vm` | RTX 2080 Ti | Disk-full / crashing |
+| vgpu-host | `nrouter-vm` | RTX 2080 Ti | BLOCKED on Python |
+| vgpu-host | `nrouter-vm` | RTX 2080 Ti | UNREACHABLE |
 
 Symptoms (2026-04-07 to 2026-04-09): Python imports hung on `.pyc` writes
 because the container disk was full; NFS retries piled up, load average
-spiked into the thousands, processes wedged. Diagnosis from Jani
+spiked into the thousands, processes wedged. Diagnosis from local infra admin
 2026-04-09 — disk-full container, not vGPU/NFS as initially suspected.
 
 The `scripts/remote/{check-vm,deploy,run-experiments,setup-vm}.sh` family

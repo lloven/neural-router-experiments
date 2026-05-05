@@ -6,7 +6,7 @@ tags: [infrastructure, diagnostics]
 # GPU VM Torch Import Cascade — Diagnostics Report
 
 ## Environment
-- **Hosts:** vgpudesktop9 (nrouter-vm1), vgpudesktop10 (nrouter-vm2)
+- **Hosts:** vgpu-host (nrouter-vm), vgpu-host (nrouter-vm)
 - **Type:** LXD containers on shared physical host
 - **GPU:** RTX 2080 Ti (11GB), NVIDIA driver 570.211, CUDA 12.8
 - **NFS:** v3 hard mount at /mnt/nfs/home (sync mode)
@@ -57,7 +57,7 @@ Since `import torch` is fundamentally incompatible with NFS-home LXD containers:
 - No direct PyTorch import needed in our experiment code
 - Refactor: src/embeddings.py to use ollama instead of sentence-transformers
 
-## Alternative fixes (require Jani)
+## Alternative fixes (require infra admin assistance)
 1. `sudo nvidia-smi -pm 1` (persistence mode — may reduce thread spawn)
 2. Mount /home as NFS with `soft` instead of `hard` (NFS calls would fail instead of block)
 3. Bind-mount HOME to local disk in the LXD container config
