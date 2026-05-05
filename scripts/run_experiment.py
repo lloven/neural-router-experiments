@@ -190,7 +190,7 @@ def parse_args():
         help="Dataset to use: D1, D2, D3, or 'all'"
     )
     parser.add_argument(
-        "--configs", type=str, default="A3",
+        "--configs", type=str, default=None,
         help="Comma-separated ablation configs (A0-A6) or 'all'"
     )
     parser.add_argument(
@@ -595,8 +595,8 @@ def _output_prefix(output_tag: str | None, tag: str) -> str:
     return f"{tag}_{timestamp}" if tag else timestamp
 
 
-def load_completed_keys(output_dir: Path, prefix: str) -> set[tuple[str, int]]:
-    """Load (config_name, seed) pairs already present in a partial results CSV.
+def load_completed_keys(output_dir: Path, prefix: str) -> set[tuple[str, str, int]]:
+    """Load (config_name, dataset, seed) triples already present in a partial results CSV.
 
     Returns an empty set if the file does not exist.
     """
@@ -608,8 +608,9 @@ def load_completed_keys(output_dir: Path, prefix: str) -> set[tuple[str, int]]:
         keys = set()
         for _, row in df.iterrows():
             config = row.get("config", row.get("config_name", ""))
+            dataset = row.get("dataset", "")
             seed = int(row.get("seed", -1))
-            keys.add((str(config), seed))
+            keys.add((str(config), str(dataset), seed))
         logger.info(f"Resuming: found {len(keys)} completed runs in {csv_path}")
         return keys
     except Exception as e:
@@ -728,7 +729,7 @@ def main():
     if profile:
         p_abl = profile.get("ablation", {})
         # Only override if user didn't explicitly pass the flag
-        if args.configs == "A3":  # argparse default
+        if args.configs is None:  # argparse default: no --configs given
             configs_list = p_abl.get("configs", ["A3"])
             args.configs = ",".join(configs_list)
         if args.baselines == "":  # argparse default
@@ -745,10 +746,16 @@ def main():
 
     # Parse arguments
     datasets = ALL_DATASETS if args.dataset.lower() == "all" else args.dataset.split(",")
+    # If no profile was loaded and no --configs given, fall back to the historical default.
+    if args.configs is None:
+        args.configs = "A3"
     configs = list(ABLATION_CONFIGS.keys()) if args.configs.lower() == "all" else args.configs.split(",")
-    baselines = ALL_BASELINES if args.baselines.lower() == "all" else (
-        args.baselines.split(",") if args.baselines else []
-    )
+    if args.baselines.lower() in ("all",):
+        baselines = ALL_BASELINES
+    elif args.baselines.lower() in ("none", ""):
+        baselines = []
+    else:
+        baselines = args.baselines.split(",")
     seeds = [int(s) for s in args.seeds.split(",")]
 
     output_dir = Path(args.output_dir)
@@ -756,7 +763,7 @@ def main():
     prefix = _output_prefix(args.output_tag, tag)
 
     # Load completed runs for --resume
-    completed_keys: set[tuple[str, int]] = set()
+    completed_keys: set[tuple[str, str, int]] = set()
     if args.resume:
         completed_keys = load_completed_keys(output_dir, prefix)
 
@@ -832,8 +839,8 @@ def main():
             seed_results = []
             for seed in seeds:
                 # Skip if already completed (--resume)
-                if (config_name, seed) in completed_keys:
-                    logger.info(f"  Skipping {config_name} seed={seed} (already completed)")
+                if (config_name, ds_name, seed) in completed_keys:
+                    logger.info(f"  Skipping {config_name} on {ds_name} seed={seed} (already completed)")
                     continue
 
                 llm_client.reset_stats()
@@ -904,8 +911,11 @@ def main():
             baseline_results = run_baselines_on_dataset(dataset, baselines, kappa=args.kappa)
             for br in baseline_results:
                 all_results.append(br)
-                # Baselines have seed=-1; skip if already present
-                if (br.summary_row().get("config", br.summary_row().get("config_name", "")), -1) not in completed_keys:
+                # Baselines have seed=-1; skip if already present for this dataset
+                br_row = br.summary_row()
+                br_config = br_row.get("config", br_row.get("config_name", ""))
+                br_dataset = br_row.get("dataset", ds_name)
+                if (br_config, br_dataset, -1) not in completed_keys:
                     flush_result(br, output_dir, prefix)
                     tasks_done_count += 1
                     tracker.update(tasks_done=tasks_done_count, tasks_total=total_tasks, force=True)

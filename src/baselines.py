@@ -329,11 +329,16 @@ def _run_zero_shot(
             (e.g., typeform/distilbart-mnli-12-1) for testing.
     """
     from transformers import pipeline
+    import torch
 
+    # Auto-detect GPU. -1 forces CPU; 0 picks the first CUDA device.
+    # Hardcoding to -1 (the original 2026-04-09 default) wasted ~6 min on
+    # the 2026-05-04 Mahti A100 run before this fix.
+    device = 0 if torch.cuda.is_available() else -1
     classifier = pipeline(
         "zero-shot-classification",
         model=model_name,
-        device=-1,  # CPU (use device=0 for GPU)
+        device=device,
     )
 
     candidate_labels = [s.description for s in dataset.subscriptions]
