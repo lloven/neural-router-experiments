@@ -109,6 +109,15 @@ class RouterStats:
     post_processing_time_s: float = 0.0
     total_time_s: float = 0.0
     num_subscriptions_effective: int = 0  # after context-window truncation
+    # Per-cluster decomposition for cost-model validation (Eq. 4 = Σ_c ⌈m_c/b_max(c)⌉).
+    # Counts matching-phase invocations only (excludes offline-phase
+    # CoverAndMerge calls). One slot per cluster that processed at least one
+    # event; clusters with empty queues are absent. For configs without
+    # CoverAndMerge (e.g. A0) sum(per_cluster_invocations) == llm_invocations.
+    # For configs with CoverAndMerge (A2/A3/A4) the sum is strictly less.
+    per_cluster_invocations: list[int] = field(default_factory=list)
+    per_cluster_events: list[int] = field(default_factory=list)
+    per_cluster_active_subs: list[int] = field(default_factory=list)
 
 
 # ---------------------------------------------------------------------------
@@ -231,6 +240,98 @@ ABLATION_CONFIGS = {
         use_cosine_filter=False,  # tau=0 equivalent
     ),
 }
+
+
+# ---------------------------------------------------------------------------
+# Permissive JSON extraction (verbose-LLM tolerance)
+# ---------------------------------------------------------------------------
+
+def _extract_json_object(text: str) -> dict:
+    """Extract a JSON object from a possibly verbose LLM response.
+
+    Strategy:
+      1. Strip whitespace and markdown code fences (`` ``` `` or ``` ```json ``).
+      2. Try strict ``json.loads`` first — preserves zero-cost happy path
+         for well-behaved backends (Qwen, Anthropic Claude).
+      3. On failure, scan for the first balanced ``{...}`` block in the
+         text and parse that. This recovers from common verbose-LLM
+         patterns (Llama 3.1 prose-before-JSON, post-JSON commentary,
+         "Sure, here are the matches:" prefixes, etc.).
+
+    Args:
+        text: Raw LLM completion text.
+
+    Returns:
+        Parsed JSON object (dict).
+
+    Raises:
+        json.JSONDecodeError: If no parseable JSON object can be found.
+    """
+    stripped = text.strip()
+
+    # Strip markdown code fences if the entire response is a fenced block.
+    if stripped.startswith("```"):
+        lines = stripped.split("\n")
+        # Remove first line (``` or ```json) and trailing ``` if present.
+        body = lines[1:-1] if lines and lines[-1].strip() == "```" else lines[1:]
+        candidate = "\n".join(body).strip()
+        try:
+            return json.loads(candidate)
+        except json.JSONDecodeError:
+            pass  # fall through to balanced-brace scan over the original text
+
+    # Fast path: the response is already valid JSON.
+    try:
+        return json.loads(stripped)
+    except json.JSONDecodeError:
+        pass
+
+    # Slow path: find the first balanced {...} block. Track string state
+    # to ignore braces that appear inside string literals.
+    obj = _find_balanced_object(stripped)
+    if obj is None:
+        # Re-raise the original style so callers' exception handlers still match.
+        raise json.JSONDecodeError(
+            "No parseable JSON object found in response", stripped, 0,
+        )
+    return json.loads(obj)
+
+
+def _find_balanced_object(text: str) -> str | None:
+    """Return the first balanced ``{...}`` substring of *text*, or None.
+
+    Tracks string-literal state and backslash escapes so that braces
+    appearing inside JSON strings (e.g. ``"contains { brace"``) do not
+    confuse the depth counter. Stops at the first balanced top-level
+    object, which is what we want — additional trailing commentary is OK.
+    """
+    depth = 0
+    start = -1
+    in_string = False
+    escape = False
+
+    for i, ch in enumerate(text):
+        if escape:
+            escape = False
+            continue
+        if ch == "\\" and in_string:
+            escape = True
+            continue
+        if ch == '"':
+            in_string = not in_string
+            continue
+        if in_string:
+            continue
+        if ch == "{":
+            if depth == 0:
+                start = i
+            depth += 1
+        elif ch == "}":
+            if depth > 0:
+                depth -= 1
+                if depth == 0 and start != -1:
+                    return text[start:i + 1]
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -609,6 +710,12 @@ class NeuralRouter:
         events = cluster.queue
         results = []
 
+        # Per-cluster cost-model logging: open a fresh slot for this cluster.
+        # All llm_invocations += 1 lines below also increment the cluster slot.
+        self.stats.per_cluster_invocations.append(0)
+        self.stats.per_cluster_events.append(len(events))
+        self.stats.per_cluster_active_subs.append(len(subs))
+
         # Context-window truncation (crossover experiment): drop subscriptions
         # that don't fit within the hard token budget.
         if self.config.max_context_tokens is not None:
@@ -660,6 +767,7 @@ class NeuralRouter:
                 prompt_tokens = self._estimate_tokens(prompt)
             response = self.llm.invoke(prompt)
             self.stats.llm_invocations += 1
+            self.stats.per_cluster_invocations[-1] += 1
             self.stats.total_prompt_tokens += response.prompt_tokens
             self.stats.total_response_tokens += response.response_tokens
 
@@ -722,6 +830,11 @@ class NeuralRouter:
 
         # Phase 1: Build all (prompt, cluster, batch) tuples upfront
         prompt_tasks: list[tuple[str, Cluster, list[Event]]] = []
+        # Per-cluster cost-model logging: open one slot per non-empty cluster.
+        # The slot index lives in cluster_slot_idx so Phase-2 response handling
+        # can attribute each invocation to the right cluster (even though
+        # responses arrive interleaved across clusters).
+        cluster_slot_idx: dict[int, int] = {}
 
         for cluster in self.clusters:
             if not cluster.queue:
@@ -738,6 +851,13 @@ class NeuralRouter:
                     t_resp=self.config.t_resp,
                 )
                 self.stats.num_subscriptions_effective += len(subs)
+
+            # Open per-cluster slot before building prompts so the slot index
+            # is stable across the async batch. The active subs are post-truncation.
+            cluster_slot_idx[cluster.id] = len(self.stats.per_cluster_invocations)
+            self.stats.per_cluster_invocations.append(0)
+            self.stats.per_cluster_events.append(len(events))
+            self.stats.per_cluster_active_subs.append(len(subs))
 
             # Compute batch size (same logic as _match_cluster)
             sub_text = "\n".join(f"- [{s.id}] {s.description}" for s in subs)
@@ -874,8 +994,13 @@ class NeuralRouter:
                         )
                 continue
 
-            # Track stats
+            # Track stats (including per-cluster decomposition for cost-model
+            # validation; we know which cluster this response belongs to from
+            # the prompt_tasks tuple and look up the slot opened in Phase 1).
             self.stats.llm_invocations += 1
+            slot = cluster_slot_idx.get(cluster.id)
+            if slot is not None:
+                self.stats.per_cluster_invocations[slot] += 1
             self.stats.total_prompt_tokens += resp.prompt_tokens
             self.stats.total_response_tokens += resp.response_tokens
 
@@ -1026,14 +1151,13 @@ Only return the JSON, no other text."""
         Raises:
             json.JSONDecodeError: If the response is not valid JSON.
         """
-        # Try to extract JSON from response
-        text = response_text.strip()
-        if text.startswith("```"):
-            # Strip markdown code fences
-            lines = text.split("\n")
-            text = "\n".join(lines[1:-1] if lines[-1].strip() == "```" else lines[1:])
-
-        data = json.loads(text)
+        # Permissive JSON extraction. The strict `json.loads` works for
+        # well-behaved backends (Qwen, Anthropic Claude) but fails silently
+        # on verbose-output models (Llama 3.1, Mistral, ...) that wrap the
+        # JSON in prose or commentary. Fall back to balanced-brace
+        # extraction so as long as a valid JSON object exists somewhere in
+        # the response, we recover it.
+        data = _extract_json_object(response_text)
 
         results = []
         for event in events:
@@ -1068,12 +1192,8 @@ Only return the JSON, no other text."""
             Dict with "covers" (list of (parent, child) tuples) and
             "merges" (list of (id1, id2, description) triples).
         """
-        text = response_text.strip()
-        if text.startswith("```"):
-            lines = text.split("\n")
-            text = "\n".join(lines[1:-1] if lines[-1].strip() == "```" else lines[1:])
-
-        data = json.loads(text)
+        # Same permissive extraction as match-response (see comment there).
+        data = _extract_json_object(response_text)
 
         covers = []
         for pair in data.get("covers", []):

@@ -41,7 +41,7 @@ from dotenv import load_dotenv
 from src.data import load_dataset_by_name, Dataset, Subscription
 from src.router import NeuralRouter, RouterConfig, ABLATION_CONFIGS
 from src.embeddings import EmbeddingModel
-from src.evaluation import evaluate_matches
+from src.evaluation import evaluate_matches, evaluate_matches_description_aware
 from src.llm import LLMClient, DryRunLLMClient
 from src.config import load_profile, output_dir_for_mode
 
@@ -63,12 +63,21 @@ def _append_row(row: dict, path: Path):
     df.to_csv(path, mode="a", header=write_header, index=False)
 
 
-def _load_completed_keys(path: Path) -> set[tuple[str, int, int]]:
-    """Load already-completed (config, n_subscriptions, seed) triples from CSV."""
+def _load_completed_keys(path: Path, metric: str = "id") -> set[tuple[str, int, int]]:
+    """Load already-completed (config, n_subscriptions, seed) triples from CSV.
+
+    Resume scoping is per-metric: a row evaluated under ID-based F1 does
+    not satisfy a description-aware re-run, and vice versa. Pre-L61 CSVs
+    without a `metric` column are treated as `metric="id"`.
+    """
     if not path.exists():
         return set()
     try:
         df = pd.read_csv(path)
+        if "metric" in df.columns:
+            df = df[df["metric"].fillna("id") == metric]
+        elif metric != "id":
+            return set()  # legacy CSV is ID-only; description rerun starts fresh
         return {
             (str(row["config"]), int(row["n_subscriptions"]), int(row["seed"]))
             for _, row in df.iterrows()
@@ -82,12 +91,34 @@ def _subsample_subscriptions(
     n: int,
     seed: int,
 ) -> list[Subscription]:
-    """Deterministically subsample n subscriptions from the full set."""
-    if n >= len(subscriptions):
-        return list(subscriptions)
+    """Build a subscription set of exactly *n* by subsampling or duplicating.
+
+    Mirrors `scripts.run_scaling.generate_scaled_subscriptions`:
+      - n <= native: deterministic subsample, original IDs preserved.
+      - n  > native: include all originals, then sample with replacement
+        for the remainder, generating unique suffixed IDs ("orig_dup<k>").
+
+    The crossover sweep on D1 (native |S|=19) needs |S| up to 2000, which
+    requires the duplication branch.
+    """
     rng = np.random.RandomState(seed)
-    indices = rng.choice(len(subscriptions), n, replace=False)
-    return [subscriptions[i] for i in sorted(indices)]
+    native = len(subscriptions)
+
+    if n <= native:
+        indices = rng.choice(native, n, replace=False)
+        return [subscriptions[i] for i in sorted(indices)]
+
+    result = list(subscriptions)
+    remaining = n - native
+    dup_indices = rng.choice(native, remaining, replace=True)
+    for dup_idx, orig_idx in enumerate(dup_indices):
+        orig = subscriptions[orig_idx]
+        result.append(Subscription(
+            id=f"{orig.id}_dup{dup_idx}",
+            name=f"{orig.name} (variant {dup_idx})",
+            description=orig.description,
+        ))
+    return result
 
 
 def run_crossover_point(
@@ -101,6 +132,8 @@ def run_crossover_point(
     output_dir: Path,
     batch_size: int = 200,
     llm_timeout: int = 600,
+    metric: str = "id",
+    save_per_event: bool = False,
 ) -> dict:
     """Run one crossover data point: (config, n_subs, seed).
 
@@ -175,13 +208,35 @@ def run_crossover_point(
     matches = router.match_events(sub_dataset.events)
     wall_time = time.time() - t0
 
-    result = evaluate_matches(
+    eval_fn = (
+        evaluate_matches_description_aware if metric == "description"
+        else evaluate_matches
+    )
+    result = eval_fn(
         matches=matches,
         dataset=sub_dataset,
         config_name=f"{config_name}_S{n_subs}",
         seed=seed,
         router_stats=router.stats,
     )
+
+    if save_per_event:
+        per_event_path = output_dir / f"per_event_{config_name}_S{n_subs}_s{seed}.parquet"
+        per_event_path.parent.mkdir(parents=True, exist_ok=True)
+        gt_lookup = {e.id: e.ground_truth for e in sub_dataset.events}
+        rows = []
+        for m in matches:
+            rows.append({
+                "event_id": m.event_id,
+                "predicted_ids": "|".join(m.matched_subscription_ids),
+                "ground_truth_ids": "|".join(gt_lookup.get(m.event_id, [])),
+                "config": config_name,
+                "n_subscriptions": n_subs,
+                "seed": seed,
+                "max_context_tokens": max_context_tokens,
+            })
+        pd.DataFrame(rows).to_parquet(per_event_path, index=False)
+        logger.info(f"  saved per-event matches → {per_event_path.name}")
 
     return {
         "config": config_name,
@@ -198,6 +253,7 @@ def run_crossover_point(
         "tokens_prompt": result.tokens_prompt,
         "tokens_response": result.tokens_response,
         "cost_per_1k": result.cost_per_1k,
+        "metric": metric,
     }
 
 
@@ -212,6 +268,8 @@ def run_crossover_sweep(
     output_dir: Path,
     batch_size: int = 200,
     llm_timeout: int = 600,
+    metric: str = "id",
+    save_per_event: bool = False,
 ) -> pd.DataFrame:
     """Run the full crossover sweep: all (config, n_subs, seed) combos.
 
@@ -235,17 +293,22 @@ def run_crossover_sweep(
     """
     output_dir.mkdir(parents=True, exist_ok=True)
     csv_path = output_dir / f"crossover_{dataset.short_name}.csv"
-    done = _load_completed_keys(csv_path)
+    done = _load_completed_keys(csv_path, metric=metric)
     rows = []
 
     for config_name in configs:
         for n_subs in sub_volumes:
+            # NOTE: when n_subs > native, _subsample_subscriptions duplicates
+            # with renamed IDs (matching scripts.run_scaling.generate_scaled_subscriptions).
+            # This is required for the crossover sweep on D1, where the
+            # native subscription count (19) is far below the highest target
+            # (2000). Manuscript Experiment.tex §4.5 explicitly says
+            # "subsample and DUPLICATE".
             if n_subs > dataset.num_subscriptions:
                 logger.info(
-                    f"Skipping |S|={n_subs} (dataset has only "
-                    f"{dataset.num_subscriptions} subscriptions)"
+                    f"|S|={n_subs} > native ({dataset.num_subscriptions}); "
+                    f"will duplicate subscriptions with renamed IDs."
                 )
-                continue
 
             for seed in seeds:
                 key = (config_name, n_subs, seed)
@@ -264,6 +327,8 @@ def run_crossover_sweep(
                     output_dir=output_dir,
                     batch_size=batch_size,
                     llm_timeout=llm_timeout,
+                    metric=metric,
+                    save_per_event=save_per_event,
                 )
                 rows.append(row)
                 _append_row(row, csv_path)
@@ -338,6 +403,24 @@ def parse_args():
     parser.add_argument("--batch-size", type=int, default=None)
     parser.add_argument("--llm-timeout", type=int, default=None)
     parser.add_argument("--mode", type=str, default=None)
+    parser.add_argument(
+        "--max-events", type=int, default=None,
+        help="Truncate the dataset to this many events for L23 smoke runs. "
+             "Default: full corpus.",
+    )
+    parser.add_argument(
+        "--metric", choices=["id", "description"], default="id",
+        help="Evaluation metric. 'id' is ID-based F1 (default; correct when every "
+             "subscription has a unique semantic target). 'description' is "
+             "description-aware F1, required when sub set contains "
+             "duplication-with-rename (multiple IDs sharing one description) — "
+             "see L61 in Tasks/lessons.md.",
+    )
+    parser.add_argument(
+        "--save-per-event", action="store_true",
+        help="Save per-event predictions to <output_dir>/per_event_<config>_S<n>_s<seed>.parquet "
+             "for post-hoc re-evaluation under any metric.",
+    )
     return parser.parse_args()
 
 
@@ -364,6 +447,10 @@ def main():
     llm_timeout = args.llm_timeout or (600 if is_ollama else 600)
 
     dataset = load_dataset_by_name(args.dataset, cache_dir=args.cache_dir)
+    if args.max_events is not None and args.max_events < len(dataset.events):
+        logger.info("Truncating dataset to --max-events=%d (was %d)",
+                    args.max_events, len(dataset.events))
+        dataset.events = dataset.events[: args.max_events]
     logger.info(dataset.summary())
 
     if args.dry_run:
@@ -388,6 +475,8 @@ def main():
         output_dir=output_dir,
         batch_size=batch_size,
         llm_timeout=llm_timeout,
+        metric=args.metric,
+        save_per_event=args.save_per_event,
     )
 
 

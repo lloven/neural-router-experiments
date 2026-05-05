@@ -165,23 +165,31 @@ def test_round_robin_assignment():
 
 
 def test_qoe_optimised_assignment():
-    """QoE-optimised strategy assigns the backend with highest QoE per cluster."""
+    """QoE-optimised strategy assigns the backend with highest QoE per cluster.
+
+    Under per-cluster min-max normalisation (post-6620413 fix), each
+    metric is rescaled to [0,1] across the cluster's candidates, so
+    balanced weights pick the backend that wins on a *plurality* of
+    normalised dims. Use accuracy_first / cost_first weights to verify
+    F1-dominant vs. cost-dominant intent.
+    """
     from src.qoe import CalibrationResult, assign_qoe_optimised
 
     cal = CalibrationResult()
-    # Cluster 0: backend_a is much better on F1 (0.95 vs 0.50), enough to
-    # overcome cost/latency disadvantage even with balanced weights
     cal.add(0, "backend_a", f1=0.95, cost=5.0, latency=2.0)
     cal.add(0, "backend_b", f1=0.50, cost=1.0, latency=0.5)
-    # Cluster 1: backend_b is better (much cheaper, slightly lower F1)
     cal.add(1, "backend_a", f1=0.50, cost=5.0, latency=2.0)
     cal.add(1, "backend_b", f1=0.48, cost=0.1, latency=0.1)
 
-    weights = {"accuracy": 0.34, "cost": 0.33, "latency": 0.33}
-    assignment = assign_qoe_optimised(cal, weights=weights)
+    accuracy_first = {"accuracy": 0.70, "cost": 0.15, "latency": 0.15}
+    a = assign_qoe_optimised(cal, weights=accuracy_first)
+    assert a[0] == "backend_a"  # 0.95 > 0.50 dominates
+    assert a[1] == "backend_a"  # 0.50 > 0.48 dominates
 
-    assert assignment[0] == "backend_a"  # higher F1 wins with balanced weights
-    assert assignment[1] == "backend_b"  # much cheaper, slightly lower F1
+    cost_first = {"accuracy": 0.15, "cost": 0.70, "latency": 0.15}
+    c = assign_qoe_optimised(cal, weights=cost_first)
+    assert c[0] == "backend_b"
+    assert c[1] == "backend_b"
 
 
 # ---------------------------------------------------------------------------

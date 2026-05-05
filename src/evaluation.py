@@ -75,9 +75,15 @@ class EvaluationResult:
     tokens_prompt: int = 0
     tokens_response: int = 0
     per_event_metrics: Optional[dict] = None
+    # Per-cluster cost-model decomposition (for fig:cost-validation, Eq. 4).
+    # JSON-encoded into the result CSV by summary_row().
+    per_cluster_invocations: list[int] = field(default_factory=list)
+    per_cluster_events: list[int] = field(default_factory=list)
+    per_cluster_active_subs: list[int] = field(default_factory=list)
 
     def summary_row(self) -> dict:
         """Return a dict suitable for a DataFrame row."""
+        import json
         return {
             "config": self.config_name,
             "dataset": self.dataset_name,
@@ -92,6 +98,9 @@ class EvaluationResult:
             "tokens_prompt": self.tokens_prompt,
             "tokens_response": self.tokens_response,
             "cost_per_1k": self.cost_per_1k,
+            "per_cluster_invocations": json.dumps(self.per_cluster_invocations),
+            "per_cluster_events": json.dumps(self.per_cluster_events),
+            "per_cluster_active_subs": json.dumps(self.per_cluster_active_subs),
         }
 
 
@@ -195,6 +204,98 @@ def evaluate_matches(
             "f1s": f1s,
             "fprs": fprs,
         },
+        per_cluster_invocations=list(router_stats.per_cluster_invocations) if router_stats else [],
+        per_cluster_events=list(router_stats.per_cluster_events) if router_stats else [],
+        per_cluster_active_subs=list(router_stats.per_cluster_active_subs) if router_stats else [],
+    )
+
+
+def evaluate_matches_description_aware(
+    matches: list[MatchResult],
+    dataset: Dataset,
+    config_name: str = "",
+    seed: int = 0,
+    router_stats: Optional[RouterStats] = None,
+) -> EvaluationResult:
+    """Description-aware variant of `evaluate_matches`.
+
+    Per L61 (Synthetic-data helpers must preserve evaluation metric
+    invariants): when the subscription set contains multiple distinct IDs
+    that share a description (the duplication-with-rename setup used in
+    crossover sweeps to test |S| > native), ID-based F1 misclassifies
+    correct semantic matches as misses if CoverAndMerge collapses
+    duplicates and retains only one ID. Description-aware F1 fixes this
+    by collapsing both predictions and ground truth to description-sets
+    before computing precision/recall/F1.
+
+    Use this metric whenever the subscription set may contain
+    description-equivalent IDs (e.g., crossover sweeps with duplication).
+    For native datasets where every subscription has a distinct
+    description, this metric returns the same numbers as `evaluate_matches`.
+    """
+    from collections import defaultdict
+    sub_id_to_desc = {s.id: s.description for s in dataset.subscriptions}
+    desc_to_ids: dict[str, set[str]] = defaultdict(set)
+    for s in dataset.subscriptions:
+        desc_to_ids[s.description].add(s.id)
+
+    def to_desc_set(ids: list[str]) -> set[str]:
+        out = set()
+        for sid in ids:
+            # Compound IDs from CoverAndMerge (e.g., "id1+id2") split here.
+            for piece in str(sid).split("+"):
+                desc = sub_id_to_desc.get(piece)
+                if desc is not None:
+                    out.add(desc)
+        return out
+
+    matches_by_event = {m.event_id: m for m in matches}
+
+    precisions, recalls, f1s, fprs = [], [], [], []
+    universe = set(s.description for s in dataset.subscriptions)
+    universe_size = len(universe)
+    for event in dataset.events:
+        m = matches_by_event.get(event.id)
+        pred_desc = to_desc_set(m.matched_subscription_ids) if m else set()
+        gt_desc = to_desc_set(event.ground_truth)
+
+        tp = len(pred_desc & gt_desc)
+        fp = len(pred_desc - gt_desc)
+        fn = len(gt_desc - pred_desc)
+        tn = max(0, universe_size - len(pred_desc | gt_desc))
+
+        precision = tp / (tp + fp) if (tp + fp) > 0 else (1.0 if not gt_desc else 0.0)
+        recall = tp / (tp + fn) if (tp + fn) > 0 else 1.0
+        f1 = 2 * precision * recall / (precision + recall) if (precision + recall) > 0 else 0.0
+        neg_universe = universe_size - len(gt_desc)
+        fpr = fp / neg_universe if neg_universe > 0 else 0.0
+
+        precisions.append(precision)
+        recalls.append(recall)
+        f1s.append(f1)
+        fprs.append(fpr)
+
+    return EvaluationResult(
+        config_name=config_name,
+        dataset_name=dataset.short_name,
+        seed=seed,
+        precision=_compute_ci(precisions, "precision"),
+        recall=_compute_ci(recalls, "recall"),
+        f1=_compute_ci(f1s, "f1"),
+        fpr=_compute_ci(fprs, "fpr"),
+        invocations=router_stats.llm_invocations if router_stats else 0,
+        compression_ratio=router_stats.compression_ratio if router_stats else 1.0,
+        latency_s=router_stats.total_time_s if router_stats else 0.0,
+        cost_per_1k=0.0,
+        tokens_prompt=router_stats.total_prompt_tokens if router_stats else 0,
+        tokens_response=router_stats.total_response_tokens if router_stats else 0,
+        per_event_metrics={
+            "precisions": precisions, "recalls": recalls,
+            "f1s": f1s, "fprs": fprs,
+        },
+        per_cluster_invocations=list(router_stats.per_cluster_invocations) if router_stats else [],
+        per_cluster_events=list(router_stats.per_cluster_events) if router_stats else [],
+        per_cluster_active_subs=list(router_stats.per_cluster_active_subs) if router_stats else [],
     )
 
 
