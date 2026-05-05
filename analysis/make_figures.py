@@ -42,8 +42,12 @@ plt.rcParams.update({
     "grid.linestyle": "--",
 })
 
-OUT = Path("<manuscript-figs>")
-OUT.mkdir(exist_ok=True)
+import os
+# Default output: ../figs/ relative to the experiments root (figs/ next
+# to results/). Override via NROUTER_FIG_DIR env var when rendering into
+# a manuscript directory.
+OUT = Path(os.environ.get("NROUTER_FIG_DIR", Path(__file__).resolve().parent.parent / "figs"))
+OUT.mkdir(parents=True, exist_ok=True)
 SENS = Path("results/puhti_mirror/sensitivity_by_task")
 SCALE = Path("results/puhti_mirror/scaling_by_task")
 
