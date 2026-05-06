@@ -44,6 +44,190 @@ DEFAULT_WEIGHTS = QOE_WEIGHT_PRESETS["balanced"]
 
 
 # ---------------------------------------------------------------------------
+# C9: Perturbation hooks for the QoE adaptive loop
+# ---------------------------------------------------------------------------
+
+VALID_PERTURBATION_KINDS = (
+    "none",
+    "topic_restricted_cal",
+    "latency_injection",
+    "failure_injection",
+)
+
+
+@dataclass
+class PerturbationSpec:
+    """Perturbation hook specification for the QoE adaptive loop (C9).
+
+    Three perturbation kinds:
+      - ``topic_restricted_cal``: the calibration sample is drawn from a
+        topic-restricted slice (``topic_mask``); evaluation runs on the
+        full corpus. Tests whether QoE-optimised generalises from a
+        narrow calibration set.
+      - ``latency_injection``: at event index ``injection_event_index``,
+        an extra ``injected_latency_s`` is added to every subsequent
+        LLM call (treatment-verifiable via wall-clock).
+      - ``failure_injection``: at event index ``injection_event_index``,
+        the backend named ``backend_to_fail`` returns empty matches
+        (F1=0). Per L41: target one of N backends, not all.
+
+    L38: every perturbation must be applied verifiably; ``is_noop()`` is
+    the smoke-test contract that a default-constructed spec changes
+    nothing.
+
+    L39: ``validate()`` raises on invalid configuration (missing required
+    fields per kind); never log-and-continue.
+    """
+    kind: str = "none"
+    topic_mask: Optional[Sequence[int]] = None
+    injection_event_index: Optional[int] = None
+    injected_latency_s: Optional[float] = None
+    backend_to_fail: Optional[str] = None
+
+    def is_noop(self) -> bool:
+        return self.kind == "none"
+
+    def validate(self) -> "PerturbationSpec":
+        """Raise ValueError if the spec is malformed for its kind.
+
+        Per L39, perturbation hooks must not silently swallow errors.
+        Returns self so callers can chain: ``spec = PerturbationSpec(...).validate()``.
+        """
+        if self.kind not in VALID_PERTURBATION_KINDS:
+            raise ValueError(
+                f"unknown perturbation kind {self.kind!r}; "
+                f"expected one of {VALID_PERTURBATION_KINDS}"
+            )
+        if self.kind == "topic_restricted_cal":
+            if self.topic_mask is None:
+                raise ValueError(
+                    "topic_mask is required for kind='topic_restricted_cal'"
+                )
+        elif self.kind == "latency_injection":
+            if self.injection_event_index is None:
+                raise ValueError(
+                    "injection_event_index is required for kind='latency_injection'"
+                )
+            if self.injected_latency_s is None:
+                raise ValueError(
+                    "injected_latency_s is required for kind='latency_injection'"
+                )
+        elif self.kind == "failure_injection":
+            if self.injection_event_index is None:
+                raise ValueError(
+                    "injection_event_index is required for kind='failure_injection'"
+                )
+            if self.backend_to_fail is None:
+                raise ValueError(
+                    "backend_to_fail is required for kind='failure_injection' (L41: target one backend)"
+                )
+        return self
+
+
+def apply_latency_injection(
+    perturbation: Optional[PerturbationSpec], event_idx: int
+) -> float:
+    """C9 / Task 1.3: latency-injection hook.
+
+    Returns the additional latency (seconds) to inject for the event at
+    ``event_idx``. Zero for any non-latency_injection perturbation (or
+    None), and zero for events with ``event_idx < injection_event_index``.
+
+    Callers wrap their LLM calls with::
+
+        extra = apply_latency_injection(self.perturbation, event_idx)
+        if extra > 0: time.sleep(extra)
+
+    L38: the per-event return value is the treatment-verifiable signal —
+    a smoke test that compares pre-/post-injection wall-clock latencies
+    asserts post >= pre + injected_latency_s for at least one cell.
+    """
+    if perturbation is None or perturbation.kind != "latency_injection":
+        return 0.0
+    if perturbation.injection_event_index is None or perturbation.injected_latency_s is None:
+        return 0.0
+    if event_idx >= perturbation.injection_event_index:
+        return float(perturbation.injected_latency_s)
+    return 0.0
+
+
+def total_latency_offset_for_queue(
+    perturbation: Optional[PerturbationSpec],
+    event_indices: Sequence[int],
+) -> float:
+    """C9 / Task 1.6: aggregate latency offset for a cluster's event queue.
+
+    Returns the total seconds to sleep before the cluster's LLM call,
+    summing per-event injected latency for all events with idx >=
+    ``injection_event_index``. The cluster-level wiring sleeps once with
+    this aggregate (treatment-verifiable via wall-clock difference
+    against a no-perturbation baseline).
+
+    Zero for any non-latency_injection perturbation (or None), and zero
+    when the queue contains no post-injection events.
+    """
+    if perturbation is None or perturbation.kind != "latency_injection":
+        return 0.0
+    per_event = float(perturbation.injected_latency_s or 0.0)
+    cutoff = perturbation.injection_event_index
+    if cutoff is None or per_event <= 0.0:
+        return 0.0
+    return per_event * sum(1 for idx in event_indices if idx >= cutoff)
+
+
+def partition_queue_by_failure(
+    perturbation: Optional[PerturbationSpec],
+    backend_name: str,
+    event_indices: Sequence[int],
+) -> tuple[list[int], list[int]]:
+    """C9 / Task 1.7: split a cluster's queue into (healthy, failed).
+
+    For ``failure_injection`` on the targeted backend, events with
+    ``idx >= injection_event_index`` go into ``failed`` (LLM call skipped,
+    empty match emitted); the rest go into ``healthy`` (LLM call as
+    normal). Per L41, a non-targeted backend's queue is entirely healthy.
+    Returns (healthy, failed) with original ordering preserved within
+    each list.
+    """
+    indices = list(event_indices)
+    if perturbation is None or perturbation.kind != "failure_injection":
+        return indices, []
+    cutoff = perturbation.injection_event_index
+    target = perturbation.backend_to_fail
+    if cutoff is None or target is None or backend_name != target:
+        return indices, []
+    healthy = [idx for idx in indices if idx < cutoff]
+    failed = [idx for idx in indices if idx >= cutoff]
+    return healthy, failed
+
+
+def is_backend_failed(
+    perturbation: Optional[PerturbationSpec],
+    backend_name: str,
+    event_idx: int,
+) -> bool:
+    """C9 / Task 1.4: backend-failure-injection predicate.
+
+    Returns True iff the active perturbation is ``failure_injection`` and
+    ``event_idx >= injection_event_index`` and ``backend_name`` matches
+    ``perturbation.backend_to_fail``. The QoE matching path treats a
+    failed-backend cell as if the LLM returned an empty match
+    (F1=0 contribution); the assigner can then re-route per L41
+    (one-of-N partial degradation).
+    """
+    if perturbation is None or perturbation.kind != "failure_injection":
+        return False
+    if (
+        perturbation.injection_event_index is None
+        or perturbation.backend_to_fail is None
+    ):
+        return False
+    if backend_name != perturbation.backend_to_fail:
+        return False
+    return event_idx >= perturbation.injection_event_index
+
+
+# ---------------------------------------------------------------------------
 # QoE score computation
 # ---------------------------------------------------------------------------
 
@@ -245,12 +429,54 @@ class QoEAssigner:
         backends: list[str],
         weights: dict[str, float] | None = None,
         calibration_fraction: float = 0.1,
+        perturbation: PerturbationSpec | None = None,
     ):
         self.clusters = clusters
         self.backends = backends
         self.weights = weights or dict(DEFAULT_WEIGHTS)
         self.calibration_fraction = calibration_fraction
+        # C9: validate perturbation eagerly per L39; never log-and-continue.
+        self.perturbation = (
+            perturbation.validate() if perturbation is not None else None
+        )
         self.calibration: CalibrationResult | None = None
+
+    def _sample_calibration_events(self, events: list) -> list:
+        """Draw the calibration sample, applying any active perturbation.
+
+        Default behaviour: deterministic random sample of size
+        ``len(events) * self.calibration_fraction`` (rng seed 42 for
+        reproducibility). The sample preserves event-list order to keep
+        downstream code stable.
+
+        With ``perturbation.kind == 'topic_restricted_cal'``: events are
+        first filtered to those whose ground_truth intersects the
+        ``perturbation.topic_mask``, then the fraction is applied to the
+        filtered pool. Per L38 this is the treatment whose application is
+        verifiable from the sample's topic distribution.
+
+        Per L39: an empty calibration pool (e.g., topic_mask matches no
+        events) raises ValueError rather than returning an empty sample.
+        """
+        import numpy as np
+
+        pool = events
+        if self.perturbation is not None and self.perturbation.kind == "topic_restricted_cal":
+            mask = set(self.perturbation.topic_mask or [])
+            pool = [e for e in events if set(e.ground_truth) & mask]
+            if not pool:
+                raise ValueError(
+                    f"topic_restricted_cal: empty calibration pool "
+                    f"(topic_mask={list(mask)!r} matched no events)"
+                )
+
+        n_sample = max(1, int(len(pool) * self.calibration_fraction))
+        rng = np.random.RandomState(42)
+        if n_sample >= len(pool):
+            # Sampling more than available — return all (preserve order)
+            return list(pool)
+        sample_indices = rng.choice(len(pool), n_sample, replace=False)
+        return [pool[i] for i in sorted(sample_indices)]
 
     def calibrate(
         self,
@@ -277,10 +503,9 @@ class QoEAssigner:
         from .evaluation import evaluate_matches
 
         cal = CalibrationResult()
-        n_sample = max(1, int(len(events) * self.calibration_fraction))
-        rng = np.random.RandomState(42)
-        sample_indices = rng.choice(len(events), n_sample, replace=False)
-        sample_events = [events[i] for i in sorted(sample_indices)]
+        # C9: route through the perturbation-aware helper so every code path
+        # that draws a calibration sample respects the active perturbation.
+        sample_events = self._sample_calibration_events(events)
 
         for cluster in self.clusters:
             for backend_name in self.backends:
