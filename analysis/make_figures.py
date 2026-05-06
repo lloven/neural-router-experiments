@@ -490,6 +490,139 @@ def fig_qoe():
     print(f"  saved qoe_pareto.pdf ({len(agg)} (strategy, preset, backend) cells)")
 
 
+def fig_qoe_perturbation():
+    """fig:qoe-perturbation — TAAS round-2 C9.
+
+    Two panels: (a) F1 by perturbation × strategy on D1 (bar chart with
+    95% CI across seeds); (b) latency Δ for latency_injection vs baseline
+    by (strategy, backend), matched-cell.
+    """
+    perturbation_dirs = {
+        "baseline": "results/full/qoe_perturbation/by_task/baseline/qoe_D1.csv",
+        "topic_restricted": "results/full/qoe_perturbation/by_task/topic_restricted/qoe_D1.csv",
+        "latency_injection": "results/full/qoe_perturbation/by_task/latency_injection/qoe_D1.csv",
+    }
+    frames = []
+    for label, path in perturbation_dirs.items():
+        p = Path(path)
+        if not p.exists():
+            print(f"  fig:qoe-perturbation SKIPPED — {label} CSV missing at {path}")
+            return
+        df = pd.read_csv(p)
+        df["perturbation"] = label
+        frames.append(df)
+    plot_df = pd.concat(frames, ignore_index=True)
+
+    fig, axes = plt.subplots(1, 2, figsize=(7.0, 3.0))
+
+    # Panel (a): F1 by perturbation × strategy with 95% CI
+    ax = axes[0]
+    summary = plot_df.groupby(["perturbation", "strategy"]).agg(
+        f1_mean=("f1", "mean"),
+        f1_std=("f1", "std"),
+        n=("seed", "nunique"),
+    ).reset_index()
+    summary["f1_ci95"] = 1.96 * summary["f1_std"] / summary["n"].clip(lower=1).pow(0.5)
+    perturbations = ["baseline", "topic_restricted", "latency_injection"]
+    strategies = ["homogeneous", "round_robin", "qoe_optimised"]
+    width = 0.25
+    x = list(range(len(perturbations)))
+    for i, strat in enumerate(strategies):
+        sub = summary[summary["strategy"] == strat].set_index("perturbation").reindex(perturbations)
+        ax.bar([xi + i * width for xi in x], sub["f1_mean"].values,
+               width=width, yerr=sub["f1_ci95"].values, capsize=3,
+               label=strat, alpha=0.85, edgecolor="black", linewidth=0.4)
+    ax.set_xticks([xi + width for xi in x])
+    ax.set_xticklabels(["baseline", "topic-restr.", "latency-inj."], rotation=20, ha="right", fontsize=8)
+    ax.set_ylabel("Macro-F1 (D1)", fontsize=8)
+    ax.legend(loc="upper right", fontsize=7)
+    ax.set_title("(a) F1 by perturbation × strategy", fontsize=8)
+    ax.tick_params(axis="y", labelsize=7)
+
+    # Panel (b): latency delta (latency_injection - baseline) by (strategy, backend)
+    ax = axes[1]
+    base = plot_df[plot_df["perturbation"] == "baseline"]
+    lat = plot_df[plot_df["perturbation"] == "latency_injection"]
+    key = ["strategy", "weight_preset", "backend", "seed"]
+    joined = base.merge(lat, on=key, suffixes=("_base", "_lat"))
+    joined["delta"] = joined["latency_s_lat"] - joined["latency_s_base"]
+    delta_summary = joined.groupby(["strategy", "backend"]).agg(
+        delta_mean=("delta", "mean"),
+        delta_std=("delta", "std"),
+        n=("seed", "nunique"),
+    ).reset_index()
+    delta_summary["delta_ci95"] = (
+        1.96 * delta_summary["delta_std"] / delta_summary["n"].clip(lower=1).pow(0.5)
+    )
+    labels = [f"{r['strategy'][:8]}/{r['backend']}" for _, r in delta_summary.iterrows()]
+    ax.barh(range(len(delta_summary)), delta_summary["delta_mean"].values,
+            xerr=delta_summary["delta_ci95"].values, capsize=3,
+            color="C3", alpha=0.85, edgecolor="black", linewidth=0.4)
+    ax.set_yticks(range(len(delta_summary)))
+    ax.set_yticklabels(labels, fontsize=7)
+    ax.axvline(0, color="black", linewidth=0.6, linestyle="--", alpha=0.5)
+    ax.set_xlabel(r"Δ latency_s (lat. inj. − baseline)", fontsize=8)
+    ax.set_title("(b) Matched-cell latency delta", fontsize=8)
+    ax.tick_params(axis="x", labelsize=7)
+
+    plt.tight_layout()
+    fig.savefig(OUT / "qoe_perturbation.pdf")
+    plt.close(fig)
+    print(f"  saved qoe_perturbation.pdf ({len(plot_df)} rows across 3 perturbations)")
+
+
+def fig_qoe_calfrac():
+    """fig:qoe-calfrac — TAAS round-2 H4.
+
+    Single panel: F1 (mean ± 95% CI) vs calibration_fraction, one line per
+    strategy. Hypothesis: QoE-optimised's line crosses round-robin's
+    around 0.20–0.50, validating the calibration-noise-limited claim.
+    """
+    base = Path("results/full/qoe_calfrac/by_task")
+    fraction_dirs = sorted([p for p in base.glob("frac_*") if (p / "qoe_D1.csv").exists()])
+    if not fraction_dirs:
+        print("  fig:qoe-calfrac SKIPPED — no qoe_calfrac CSVs found")
+        return
+
+    frames = []
+    for d in fraction_dirs:
+        df = pd.read_csv(d / "qoe_D1.csv")
+        # The fraction is recorded in the CSV per L53 — read it from there,
+        # don't re-parse the directory name.
+        if "calibration_fraction" not in df.columns:
+            print(f"  fig:qoe-calfrac SKIPPED — {d} missing calibration_fraction column")
+            return
+        frames.append(df)
+    plot_df = pd.concat(frames, ignore_index=True)
+
+    summary = plot_df.groupby(["calibration_fraction", "strategy"]).agg(
+        f1_mean=("f1", "mean"),
+        f1_std=("f1", "std"),
+        n=("seed", "nunique"),
+    ).reset_index()
+    summary["f1_ci95"] = 1.96 * summary["f1_std"] / summary["n"].clip(lower=1).pow(0.5)
+
+    fig, ax = plt.subplots(figsize=(4.0, 2.8))
+    strategy_color = {"homogeneous": "C0", "round_robin": "C2", "qoe_optimised": "C3"}
+    for strat, color in strategy_color.items():
+        sub = summary[summary["strategy"] == strat].sort_values("calibration_fraction")
+        if sub.empty:
+            continue
+        ax.errorbar(sub["calibration_fraction"], sub["f1_mean"],
+                    yerr=sub["f1_ci95"], color=color, marker="o", linewidth=1.2,
+                    markersize=5, capsize=3, label=strat, alpha=0.9)
+    ax.set_xscale("log")
+    ax.set_xlabel("Calibration fraction", fontsize=9)
+    ax.set_ylabel("Macro-F1 (D1)", fontsize=9)
+    ax.legend(loc="lower right", fontsize=7)
+    ax.tick_params(labelsize=7)
+    ax.grid(True, alpha=0.3)
+    plt.tight_layout()
+    fig.savefig(OUT / "qoe_calfrac.pdf")
+    plt.close(fig)
+    print(f"  saved qoe_calfrac.pdf ({len(summary)} (frac, strategy) cells)")
+
+
 if __name__ == "__main__":
     print(f"Output dir: {OUT}")
     fig_k_sensitivity()
@@ -502,4 +635,6 @@ if __name__ == "__main__":
     fig_d2_discrim()
     fig_crossover()
     fig_qoe()
+    fig_qoe_perturbation()
+    fig_qoe_calfrac()
     print("done.")

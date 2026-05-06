@@ -45,6 +45,7 @@ from src.qoe import (
     QOE_WEIGHT_PRESETS,
     assign_homogeneous,
     assign_round_robin,
+    PerturbationSpec,
 )
 from src.config import load_profile, output_dir_for_mode, get_model_overrides
 
@@ -60,8 +61,24 @@ DEFAULT_SEEDS = [42, 123, 456, 789, 0]
 
 
 def _append_row(row: dict, path: Path):
-    """Append a single result row to a CSV, creating it with header if needed."""
+    """Append a single result row to a CSV, creating it with header if needed.
+
+    L51: fail-fast on schema drift. If the CSV exists with a header that
+    doesn't match the row's keys, raise rather than appending mixed-width
+    rows that downstream pandas.read_csv cannot parse.
+    """
     write_header = not path.exists() or path.stat().st_size == 0
+    if not write_header:
+        with open(path) as fh:
+            existing_header = fh.readline().rstrip("\n").split(",")
+        if existing_header != list(row.keys()):
+            raise RuntimeError(
+                f"_append_row schema mismatch at {path}: "
+                f"existing header has {len(existing_header)} columns "
+                f"({existing_header}), new row has {len(row)} columns "
+                f"({list(row.keys())}). Wipe the output dir before re-running, "
+                "or rotate the path."
+            )
     df = pd.DataFrame([row])
     df.to_csv(path, mode="a", header=write_header, index=False)
 
@@ -93,6 +110,7 @@ def _run_with_assignment(
     llm_clients: dict[str, LLMClient],
     embedder: EmbeddingModel,
     seed: int,
+    perturbation: PerturbationSpec | None = None,
 ) -> dict:
     """Run matching with per-cluster backend assignment and evaluate.
 
@@ -126,17 +144,30 @@ def _run_with_assignment(
     for cluster in clusters:
         cluster.queue = []
 
+    # C9: track per-cluster global event indices in parallel with cluster.queue
+    # so the perturbation hooks (latency injection, failure injection) can be
+    # applied at evaluation time. The index is the position in dataset.events.
+    cluster_queue_indices: dict = {c.id: [] for c in clusters}
+
     for i, event in enumerate(dataset.events):
         assigned = False
         for j, cluster in enumerate(clusters):
             if similarities[i, j] >= 0.3:
                 cluster.queue.append(event)
+                cluster_queue_indices[cluster.id].append(i)
                 assigned = True
         if not assigned:
             nearest = int(np.argmax(similarities[i]))
             clusters[nearest].queue.append(event)
+            cluster_queue_indices[clusters[nearest].id].append(i)
 
     # Match each cluster using its assigned backend
+    from src.qoe import (
+        total_latency_offset_for_queue,
+        partition_queue_by_failure,
+    )
+    from src.router import MatchResult as _MR
+
     t0 = time.time()
     for cluster in clusters:
         if not cluster.queue:
@@ -144,6 +175,42 @@ def _run_with_assignment(
 
         backend_name = assignment.get(cluster.id, list(llm_clients.keys())[0])
         llm = llm_clients[backend_name]
+
+        # C9 / Task 1.7: failure injection — split the queue into healthy
+        # (LLM call as normal) and failed (skip the call, emit empty match
+        # for treatment-verifiable F1=0 contribution).
+        queue_indices = cluster_queue_indices.get(cluster.id, [])
+        if perturbation is not None and queue_indices:
+            healthy_indices, failed_indices = partition_queue_by_failure(
+                perturbation, backend_name, queue_indices,
+            )
+            if failed_indices:
+                # Emit empty matches for the failed events — never reach the LLM.
+                failed_set = set(failed_indices)
+                for idx, event in zip(queue_indices, cluster.queue):
+                    if idx in failed_set:
+                        all_matches.setdefault(
+                            event.id,
+                            _MR(event_id=event.id, matched_subscription_ids=[]),
+                        )
+                # Restrict the queue to healthy events for the LLM call.
+                healthy_set = set(healthy_indices)
+                cluster.queue = [
+                    e for idx, e in zip(queue_indices, cluster.queue)
+                    if idx in healthy_set
+                ]
+                cluster_queue_indices[cluster.id] = list(healthy_indices)
+                queue_indices = list(healthy_indices)
+                if not cluster.queue:
+                    # Whole queue failed; skip remaining LLM setup for this cluster.
+                    continue
+
+        # C9 / Task 1.6: latency injection — sleep once per cluster with the
+        # aggregate per-event offset for events at-or-after injection_event_index.
+        if perturbation is not None and queue_indices:
+            extra = total_latency_offset_for_queue(perturbation, queue_indices)
+            if extra > 0.0:
+                time.sleep(extra)
 
         config = RouterConfig(
             **{
@@ -230,6 +297,8 @@ def run_qoe_experiment(
     weight_presets: list[str] = None,
     seeds: list[int] = None,
     output_dir: Path = Path("results"),
+    calibration_fraction: float = 0.1,
+    perturbation: PerturbationSpec | None = None,
 ) -> pd.DataFrame:
     """Run the full QoE experiment: all (strategy, weight, seed) combos.
 
@@ -295,6 +364,7 @@ def run_qoe_experiment(
                     assignment = assign_homogeneous(clusters, backend_name)
                     metrics = _run_with_assignment(
                         dataset, clusters, assignment, llm_clients, embedder, seed,
+                        perturbation=perturbation,
                     )
                     row = {
                         "strategy": "homogeneous",
@@ -302,6 +372,8 @@ def run_qoe_experiment(
                         "backend": backend_name,
                         "seed": seed,
                         "dataset": dataset.short_name,
+                        "calibration_fraction": calibration_fraction,
+                        "perturbation_kind": (perturbation.kind if perturbation else "none"),
                         "assignment": str(assignment),
                         **metrics,
                     }
@@ -329,6 +401,7 @@ def run_qoe_experiment(
                 assignment = assign_round_robin(clusters, backend_names)
                 metrics = _run_with_assignment(
                     dataset, clusters, assignment, llm_clients, embedder, seed,
+                    perturbation=perturbation,
                 )
                 row = {
                     "strategy": "round_robin",
@@ -336,6 +409,8 @@ def run_qoe_experiment(
                     "backend": "mixed",
                     "seed": seed,
                     "dataset": dataset.short_name,
+                    "calibration_fraction": calibration_fraction,
+                    "perturbation_kind": (perturbation.kind if perturbation else "none"),
                     "assignment": str(assignment),
                     **metrics,
                 }
@@ -363,6 +438,8 @@ def run_qoe_experiment(
                 assigner = QoEAssigner(
                     clusters=clusters,
                     backends=backend_names,
+                    calibration_fraction=calibration_fraction,
+                    perturbation=perturbation,
                 )
                 assigner.calibrate(
                     events=dataset.events,
@@ -384,6 +461,7 @@ def run_qoe_experiment(
 
                     metrics = _run_with_assignment(
                         dataset, clusters, assignment, llm_clients, embedder, seed,
+                        perturbation=perturbation,
                     )
                     row = {
                         "strategy": "qoe_optimised",
@@ -391,6 +469,8 @@ def run_qoe_experiment(
                         "backend": "mixed",
                         "seed": seed,
                         "dataset": dataset.short_name,
+                        "calibration_fraction": calibration_fraction,
+                        "perturbation_kind": (perturbation.kind if perturbation else "none"),
                         "assignment": str(assignment),
                         **metrics,
                     }
@@ -477,7 +557,58 @@ def parse_args():
         help="Truncate the dataset to this many events for L23 smoke runs. "
              "Default: full corpus.",
     )
+    # H4: calibration-fraction flag (TAAS round-1 reviewer mandate).
+    parser.add_argument(
+        "--calibration-fraction", type=float, default=0.1,
+        help="Fraction of events used for QoE calibration (default 0.1).",
+    )
+    # C9: perturbation hooks for the QoE adaptive loop.
+    parser.add_argument(
+        "--perturbation", type=str, default="none",
+        choices=["none", "topic_restricted_cal", "latency_injection", "failure_injection"],
+        help="C9 perturbation kind (default 'none' = no perturbation).",
+    )
+    parser.add_argument(
+        "--topic-mask", type=str, default=None,
+        help="topic_restricted_cal: comma-separated subscription IDs the calibration "
+             "sample is restricted to (e.g., 's0,s1,s2').",
+    )
+    parser.add_argument(
+        "--injection-event-index", type=int, default=None,
+        help="latency_injection / failure_injection: 0-based event index at which "
+             "the injection starts.",
+    )
+    parser.add_argument(
+        "--injected-latency-s", type=float, default=None,
+        help="latency_injection: extra wall-clock seconds added per LLM call "
+             "for events with idx >= injection-event-index.",
+    )
+    parser.add_argument(
+        "--backend-to-fail", type=str, default=None,
+        help="failure_injection: name of the backend to mark as failed for "
+             "events >= injection-event-index. Per L41, target ONE of N "
+             "backends, not all.",
+    )
     return parser.parse_args()
+
+
+def _build_perturbation_from_args(args) -> PerturbationSpec | None:
+    """Construct a PerturbationSpec from argparse args, or return None for
+    the no-op kind. Raises ValueError on malformed config (per L39)."""
+    if args.perturbation == "none":
+        return None
+    kind = args.perturbation
+    topic_mask = None
+    if args.topic_mask:
+        topic_mask = [t.strip() for t in args.topic_mask.split(",") if t.strip()]
+    spec = PerturbationSpec(
+        kind=kind,
+        topic_mask=topic_mask,
+        injection_event_index=args.injection_event_index,
+        injected_latency_s=args.injected_latency_s,
+        backend_to_fail=args.backend_to_fail,
+    )
+    return spec.validate()
 
 
 def main():
@@ -518,6 +649,11 @@ def main():
     weight_presets = [w.strip() for w in args.weight_presets.split(",")]
     seeds = [int(s.strip()) for s in args.seeds.split(",")]
 
+    # C9: build the perturbation spec (or None for no-op).
+    perturbation = _build_perturbation_from_args(args)
+    if perturbation is not None:
+        logger.info("C9 perturbation active: %s", perturbation)
+
     run_qoe_experiment(
         dataset=dataset,
         llm_clients=llm_clients,
@@ -526,6 +662,8 @@ def main():
         weight_presets=weight_presets,
         seeds=seeds,
         output_dir=output_dir,
+        calibration_fraction=args.calibration_fraction,
+        perturbation=perturbation,
     )
 
 
