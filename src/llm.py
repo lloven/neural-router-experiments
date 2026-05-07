@@ -61,16 +61,62 @@ class LLMClient:
         max_tokens: int = 4096,
         api_key: Optional[str] = None,
         timeout: Optional[int] = None,
+        cache_path: Optional["Path | str"] = None,
     ):
         self.model = model
         self.timeout = timeout  # per-request timeout in seconds (None = litellm default)
         self.temperature = temperature
         self.max_tokens = max_tokens
         self._api_key = api_key
+        # L65: optional on-disk LLM-call cache for matched-pair experiments.
+        # Keyed by (model, prompt_hash). When set, repeated invoke() calls
+        # with the same (model, prompt) return the cached response without
+        # invoking the API. This neutralises LLM-nondeterminism between
+        # SLURM jobs so baseline-vs-perturbed comparisons measure the
+        # intended treatment, not GPU/Ollama jitter.
+        from pathlib import Path
+        self.cache_path = Path(cache_path) if cache_path is not None else None
+        self._cache: Optional[dict] = None  # lazy-loaded
         self._total_invocations = 0
         self._total_prompt_tokens = 0
         self._total_response_tokens = 0
         self._total_latency = 0.0
+
+    def _cache_key(self, prompt: str) -> str:
+        """Stable hash of (model, prompt) — sha1 hex of UTF-8 bytes."""
+        import hashlib
+        h = hashlib.sha1()
+        h.update(self.model.encode("utf-8"))
+        h.update(b"\x00")
+        h.update(prompt.encode("utf-8"))
+        return h.hexdigest()
+
+    def _load_cache(self) -> dict:
+        """Read the JSONL cache file into an in-memory dict (model_prompt_hash → entry).
+        Per L51, a corrupt cache file raises rather than silently masking stale data.
+        """
+        import json
+        if self.cache_path is None:
+            return {}
+        if not self.cache_path.exists():
+            return {}
+        cache: dict = {}
+        for lineno, line in enumerate(self.cache_path.read_text().splitlines(), start=1):
+            line = line.strip()
+            if not line:
+                continue
+            entry = json.loads(line)  # propagate JSONDecodeError per L51
+            cache[entry["prompt_hash"]] = entry
+        return cache
+
+    def _write_cache_entry(self, entry: dict) -> None:
+        """Append a single JSONL entry to the cache file."""
+        import json
+        if self.cache_path is None:
+            return
+        self.cache_path.parent.mkdir(parents=True, exist_ok=True)
+        with self.cache_path.open("a") as f:
+            f.write(json.dumps(entry) + "\n")
 
     def invoke(self, prompt: str, max_retries: int = 5) -> LLMResponse:
         """Invoke the LLM with a single-turn prompt.
@@ -86,6 +132,26 @@ class LLMClient:
             Exception: Propagated from LiteLLM on API errors.
         """
         import litellm
+
+        # L65: cache check before API. Lazy-load cache on first invoke.
+        if self.cache_path is not None:
+            if self._cache is None:
+                self._cache = self._load_cache()
+            key = self._cache_key(prompt)
+            if key in self._cache:
+                entry = self._cache[key]
+                self._total_invocations += 1
+                self._total_prompt_tokens += entry["prompt_tokens"]
+                self._total_response_tokens += entry["response_tokens"]
+                # cached latency is the original measurement (replay timer is 0)
+                return LLMResponse(
+                    text=entry["text"],
+                    prompt_tokens=entry["prompt_tokens"],
+                    response_tokens=entry["response_tokens"],
+                    latency_s=entry.get("latency_s", 0.0),
+                    model=entry["model"],
+                    raw_response=None,
+                )
 
         for attempt in range(max_retries):
             t0 = time.time()
@@ -110,6 +176,21 @@ class LLMClient:
                 self._total_prompt_tokens += prompt_tokens
                 self._total_response_tokens += response_tokens
                 self._total_latency += latency
+
+                # L65: write cache entry after successful API call so
+                # subsequent matched-pair runs can hit the cache.
+                if self.cache_path is not None:
+                    entry = {
+                        "model": self.model,
+                        "prompt_hash": self._cache_key(prompt),
+                        "text": text,
+                        "prompt_tokens": prompt_tokens,
+                        "response_tokens": response_tokens,
+                        "latency_s": latency,
+                    }
+                    self._write_cache_entry(entry)
+                    if self._cache is not None:
+                        self._cache[entry["prompt_hash"]] = entry
 
                 return LLMResponse(
                     text=text,

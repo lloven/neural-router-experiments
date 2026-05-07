@@ -440,6 +440,7 @@ def run_qoe_experiment(
                     backends=backend_names,
                     calibration_fraction=calibration_fraction,
                     perturbation=perturbation,
+                    seed=seed,
                 )
                 assigner.calibrate(
                     events=dataset.events,
@@ -589,6 +590,17 @@ def parse_args():
              "events >= injection-event-index. Per L41, target ONE of N "
              "backends, not all.",
     )
+    # L65: matched-pair LLM-call cache. When set, all LLMClient instances
+    # share a single JSONL cache; baseline + perturbed runs that share the
+    # same cache file see identical LLM responses for identical (model,
+    # prompt) pairs, neutralising LLM-nondeterminism from the matched-cell
+    # comparison.
+    parser.add_argument(
+        "--llm-cache", type=str, default=None,
+        help="L65: path to a JSONL LLM-call cache shared across baseline and "
+             "perturbed runs to neutralise LLM-nondeterminism in matched-pair "
+             "analysis. Default: no cache (every call hits the API).",
+    )
     return parser.parse_args()
 
 
@@ -638,12 +650,13 @@ def main():
 
     # Parse backends
     llm_clients = {}
+    cache_path = args.llm_cache  # L65: shared cache path across all backends
     for pair in args.backends.split(","):
         name, model_id = pair.split(":", 1)
         if args.dry_run:
             llm_clients[name] = DryRunLLMClient(model=model_id)
         else:
-            llm_clients[name] = LLMClient(model=model_id)
+            llm_clients[name] = LLMClient(model=model_id, cache_path=cache_path)
 
     strategies = [s.strip() for s in args.strategies.split(",")]
     weight_presets = [w.strip() for w in args.weight_presets.split(",")]

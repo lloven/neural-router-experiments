@@ -40,14 +40,31 @@ export OLLAMA_API_BASE=http://127.0.0.1:11434
 export HF_HOME=$NR_ROOT/weights/hf
 export TOKENIZERS_PARALLELISM=false
 
-echo "=== qoe-calfrac-${FRAC} $SLURM_JOB_ID on $(hostname) ==="
+# Per-job unique port to avoid collisions when SLURM packs multiple jobs
+# on the same node (root cause of 6628944/6628945 F1 corruption: both bound
+# 11434 on g3301; the losing ollama failed silently and the python script
+# routed requests to the surviving ollama under unexpected concurrent state).
+PORT=$((20000 + SLURM_JOB_ID % 10000))
+export OLLAMA_HOST=127.0.0.1:$PORT
+export OLLAMA_API_BASE=http://127.0.0.1:$PORT
+
+echo "=== qoe-calfrac-${FRAC} $SLURM_JOB_ID on $(hostname), port $PORT ==="
 nvidia-smi -L
 date
 $OLLAMA serve > $NR_ROOT/logs/ollama-qoe-calfrac-frac-$SLURM_JOB_ID.log 2>&1 &
 OLLAMA_PID=$!
 trap "kill $OLLAMA_PID 2>/dev/null || true" EXIT
+# L41: verify ollama bound to OUR port within 30s; fail loud if not.
 for i in $(seq 1 30); do
-    curl -sS --max-time 2 http://$OLLAMA_HOST/api/tags >/dev/null 2>&1 && break
+    if curl -sS --max-time 2 http://$OLLAMA_HOST/api/tags >/dev/null 2>&1; then
+        echo "ollama ready at $OLLAMA_HOST after ${i}s"
+        break
+    fi
+    if [ "$i" -eq 30 ]; then
+        echo "FATAL: ollama failed to bind to $OLLAMA_HOST in 30s" >&2
+        tail -20 $NR_ROOT/logs/ollama-qoe-calfrac-frac-$SLURM_JOB_ID.log >&2
+        exit 1
+    fi
     sleep 1
 done
 if ! $OLLAMA list | grep -q "^qwen2.5:7b"; then $OLLAMA pull qwen2.5:7b; fi

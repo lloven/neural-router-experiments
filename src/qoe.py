@@ -430,11 +430,17 @@ class QoEAssigner:
         weights: dict[str, float] | None = None,
         calibration_fraction: float = 0.1,
         perturbation: PerturbationSpec | None = None,
+        seed: int = 42,
     ):
         self.clusters = clusters
         self.backends = backends
         self.weights = weights or dict(DEFAULT_WEIGHTS)
         self.calibration_fraction = calibration_fraction
+        # L65: thread the seed through every randomness source — calibration
+        # sample selection (_sample_calibration_events) and inner RouterConfig
+        # (calibrate). Without this, --seeds 42,123,... draws identical
+        # samples and the 5-seed CI95 measures k-means + LLM jitter only.
+        self.seed = seed
         # C9: validate perturbation eagerly per L39; never log-and-continue.
         self.perturbation = (
             perturbation.validate() if perturbation is not None else None
@@ -471,7 +477,10 @@ class QoEAssigner:
                 )
 
         n_sample = max(1, int(len(pool) * self.calibration_fraction))
-        rng = np.random.RandomState(42)
+        # L65: use self.seed (threaded from outer per-seed loop), not a
+        # hardcoded 42. Pre-fix this line silently disabled the 5-seed
+        # variance source the manuscript implies.
+        rng = np.random.RandomState(self.seed)
         if n_sample >= len(pool):
             # Sampling more than available — return all (preserve order)
             return list(pool)
@@ -513,12 +522,14 @@ class QoEAssigner:
                 if hasattr(llm, 'reset_stats'):
                     llm.reset_stats()
 
-                # Create a minimal router with A3 config for this backend
+                # Create a minimal router with A3 config for this backend.
+                # L65: thread self.seed (not hardcoded 42) so calibration's
+                # k-means partition varies across seeds.
                 config = RouterConfig(
                     **{
                         **ABLATION_CONFIGS["A3"].__dict__,
                         "llm_model": llm.model,
-                        "seed": 42,
+                        "seed": self.seed,
                         "k": 1,  # single cluster (we're testing per-cluster)
                     }
                 )
