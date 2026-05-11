@@ -61,7 +61,7 @@ fi
 
 cd $NR_ROOT/code
 FULL_OUT=$NR_ROOT/code/results/full/qoe_perturbation/by_task
-# L51: clean ONLY this cell's subdir; preserve baseline (already complete).
+# Clean ONLY this cell's subdir; preserve baseline (already complete).
 rm -rf "$FULL_OUT/topic_restricted"
 mkdir -p "$FULL_OUT/topic_restricted"
 SHARED_FLAGS=(--dataset D1 \

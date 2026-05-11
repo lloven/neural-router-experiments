@@ -55,7 +55,7 @@ fi
 
 cd $NR_ROOT/code
 FULL_OUT=$NR_ROOT/code/results/full/qoe_perturbation/by_task
-# L51: clean state per run for the canonical (non-smoke) cells we're about
+# Clean state per run for the canonical (non-smoke) cells we're about
 # to write — avoid schema drift across runs. Smoke output (subdir 'smoke')
 # is preserved for reference.
 for sub in baseline topic_restricted latency_injection; do
@@ -88,7 +88,7 @@ python scripts/run_qoe.py "${SHARED_FLAGS[@]}" \
     --injected-latency-s 0.05 \
     --output-dir "$FULL_OUT/latency_injection"
 
-# L30: validate every cell wrote a non-empty CSV
+# Validate every cell wrote a non-empty CSV
 for sub in baseline topic_restricted latency_injection; do
     CSV="$FULL_OUT/$sub/qoe_D1.csv"
     if [ -s "$CSV" ] && [ "$(wc -l < "$CSV")" -gt 1 ]; then

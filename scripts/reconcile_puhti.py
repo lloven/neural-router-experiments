@@ -22,9 +22,9 @@ Without reconciliation, the local manifest still shows a Puhti-completed run
 as "pending" and would re-launch it on the next `--resume`.
 
 This tool walks a local mirror of the Puhti `by_task/` tree (rsynced first
-via `rsync_puhti_results()`), validates each CSV against L30 (data row
-present, F1 non-null, config/dataset/seed match the directory name), and
-marks the matching local-manifest entry as `done` with metrics.
+via `rsync_puhti_results()`), validates each CSV (data row present, F1
+non-null, config/dataset/seed match the directory name), and marks the
+matching local-manifest entry as `done` with metrics.
 
 Usage
 =====
@@ -38,11 +38,11 @@ Usage
     # 3. Apply.
     python scripts/reconcile_puhti.py --apply
 
-L30 enforced: a CSV without a data row, or with null F1, or with mismatched
-config/dataset/seed in the row, is treated as a silent failure and left
-pending.
+CSV-content enforcement: a CSV without a data row, or with null F1, or
+with mismatched config/dataset/seed in the row, is treated as a silent
+failure and left pending.
 
-L37: this is a thin reconciliation wrapper, not a duplication of the
+This is a thin reconciliation wrapper, not a duplication of the
 orchestrator. The local manifest stays authoritative for "what ran where";
 this tool only updates `done/metrics` based on Puhti CSV evidence.
 """
@@ -114,7 +114,7 @@ def task_dir_to_run_id(name: str) -> str | None:
 
 
 # ---------------------------------------------------------------------------
-# CSV validation (L30: content, not just existence)
+# CSV validation (content, not just existence)
 # ---------------------------------------------------------------------------
 
 
@@ -126,7 +126,7 @@ def validate_csv(
 ) -> dict[str, Any] | None:
     """Validate a Puhti results CSV and return the metric row if usable.
 
-    Per L30, a structurally valid CSV is not enough — the data row must be
+    A structurally valid CSV is not enough — the data row must be
     present, F1 must be non-null, and the row's config/dataset/seed must
     match the values implied by the directory name.
 

@@ -50,7 +50,7 @@ if ! $OLLAMA list | grep -q "^qwen2.5:7b"; then
     $OLLAMA pull qwen2.5:7b
 fi
 
-# L23 multi-level smoke: integration (50 events, ~1 min) → full (full corpus, ~8 min).
+# Multi-level smoke: integration (50 events, ~1 min) → full (full corpus, ~8 min).
 # Default integration so accidental re-submission is cheap.
 SMOKE_LEVEL=${SMOKE_LEVEL:-integration}
 case "$SMOKE_LEVEL" in
@@ -73,7 +73,7 @@ python scripts/run_qoe.py \
     --max-events $MAX_E \
     --output-dir $SMOKE_OUT
 
-# L30: validate result CSV (data row present).
+# Validate result CSV (data row present).
 SMOKE_CSV=$SMOKE_OUT/qoe_D1.csv
 if [ -s "$SMOKE_CSV" ] && [ "$(wc -l < "$SMOKE_CSV")" -gt 1 ]; then
     echo "PASS smoke: CSV has data"

@@ -67,7 +67,7 @@ def _load_completed_keys(path: Path, metric: str = "id") -> set[tuple[str, int, 
     """Load already-completed (config, n_subscriptions, seed) triples from CSV.
 
     Resume scoping is per-metric: a row evaluated under ID-based F1 does
-    not satisfy a description-aware re-run, and vice versa. Pre-L61 CSVs
+    not satisfy a description-aware re-run, and vice versa. Legacy CSVs
     without a `metric` column are treated as `metric="id"`.
     """
     if not path.exists():
@@ -405,7 +405,7 @@ def parse_args():
     parser.add_argument("--mode", type=str, default=None)
     parser.add_argument(
         "--max-events", type=int, default=None,
-        help="Truncate the dataset to this many events for L23 smoke runs. "
+        help="Truncate the dataset to this many events for smoke runs. "
              "Default: full corpus.",
     )
     parser.add_argument(
@@ -413,8 +413,7 @@ def parse_args():
         help="Evaluation metric. 'id' is ID-based F1 (default; correct when every "
              "subscription has a unique semantic target). 'description' is "
              "description-aware F1, required when sub set contains "
-             "duplication-with-rename (multiple IDs sharing one description) — "
-             "see L61 in Tasks/lessons.md.",
+             "duplication-with-rename (multiple IDs sharing one description).",
     )
     parser.add_argument(
         "--save-per-event", action="store_true",

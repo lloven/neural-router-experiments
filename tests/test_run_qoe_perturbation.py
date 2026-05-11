@@ -5,7 +5,7 @@ Verifies:
     --injection-event-index, --injected-latency-s, --backend-to-fail,
     and --calibration-fraction.
   - _build_perturbation_from_args constructs a validated PerturbationSpec
-    or returns None (per L39 + L53: flag set must equal flag consumed).
+    or returns None (raises on malformed config; flag set must equal flag consumed).
 """
 from __future__ import annotations
 
@@ -39,7 +39,7 @@ def test_default_perturbation_is_none_returns_none():
 
 
 def test_topic_restricted_cli_builds_spec():
-    """L53: --topic-mask must propagate end-to-end (set ≠ consumed without
+    """--topic-mask must propagate end-to-end (set ≠ consumed without
     treatment-verification on the produced spec)."""
     from scripts.run_qoe import _build_perturbation_from_args
     args = _argparse_for(
@@ -54,7 +54,7 @@ def test_topic_restricted_cli_builds_spec():
 
 
 def test_topic_restricted_cli_missing_mask_raises():
-    """L39: topic_restricted_cal without --topic-mask must raise from
+    """topic_restricted_cal without --topic-mask must raise from
     PerturbationSpec.validate(), not silently produce a no-op."""
     from scripts.run_qoe import _build_perturbation_from_args
     args = _argparse_for(
@@ -102,7 +102,7 @@ def test_calibration_fraction_default_is_0_10():
 
 def test_calibration_fraction_flag_propagates():
     """H4: --calibration-fraction must be set AND consumed end-to-end
-    (per L53). The CLI value must match args.calibration_fraction."""
+    (flag set must equal flag consumed). The CLI value must match args.calibration_fraction."""
     args = _argparse_for(
         "--dataset", "D1",
         "--calibration-fraction", "0.20",

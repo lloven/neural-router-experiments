@@ -1,6 +1,6 @@
-"""Per L61: crossover sweep must support description-aware F1 as the
-metric of record when sub sets contain duplication-with-rename. This
-test pins:
+"""The crossover sweep must support description-aware F1 as the metric
+of record when sub sets contain duplication-with-rename (synthetic-data
+helpers must preserve evaluation metric invariants). This test pins:
 (i) `--metric description` is accepted and propagates to the run.
 (ii) Output rows include a `metric` column identifying which metric was
      used, so post-hoc analysis can't conflate the two.

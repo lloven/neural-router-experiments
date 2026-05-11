@@ -68,7 +68,7 @@ class LLMClient:
         self.temperature = temperature
         self.max_tokens = max_tokens
         self._api_key = api_key
-        # L65: optional on-disk LLM-call cache for matched-pair experiments.
+        # Optional on-disk LLM-call cache for matched-pair experiments.
         # Keyed by (model, prompt_hash). When set, repeated invoke() calls
         # with the same (model, prompt) return the cached response without
         # invoking the API. This neutralises LLM-nondeterminism between
@@ -93,7 +93,7 @@ class LLMClient:
 
     def _load_cache(self) -> dict:
         """Read the JSONL cache file into an in-memory dict (model_prompt_hash → entry).
-        Per L51, a corrupt cache file raises rather than silently masking stale data.
+        A corrupt cache file raises rather than silently masking stale data.
         """
         import json
         if self.cache_path is None:
@@ -105,7 +105,7 @@ class LLMClient:
             line = line.strip()
             if not line:
                 continue
-            entry = json.loads(line)  # propagate JSONDecodeError per L51
+            entry = json.loads(line)  # propagate JSONDecodeError rather than silently swallowing
             cache[entry["prompt_hash"]] = entry
         return cache
 
@@ -117,6 +117,52 @@ class LLMClient:
         self.cache_path.parent.mkdir(parents=True, exist_ok=True)
         with self.cache_path.open("a") as f:
             f.write(json.dumps(entry) + "\n")
+
+    def cache_lookup(self, prompt: str) -> Optional[LLMResponse]:
+        """Public cache lookup. Returns None on miss; LLMResponse on hit.
+
+        Used by both the sync invoke() path and the router's async path
+        (src/router.py:_async_match_all_clusters) so the LLM-call cache
+        protects determinism regardless of the execution model.
+        """
+        if self.cache_path is None:
+            return None
+        if self._cache is None:
+            self._cache = self._load_cache()
+        entry = self._cache.get(self._cache_key(prompt))
+        if entry is None:
+            return None
+        return LLMResponse(
+            text=entry["text"],
+            prompt_tokens=entry["prompt_tokens"],
+            response_tokens=entry["response_tokens"],
+            latency_s=entry.get("latency_s", 0.0),
+            model=entry["model"],
+            raw_response=None,
+        )
+
+    def cache_write(
+        self,
+        prompt: str,
+        text: str,
+        prompt_tokens: int,
+        response_tokens: int,
+        latency_s: float,
+    ) -> None:
+        """Public cache writer. No-op when cache_path is None."""
+        if self.cache_path is None:
+            return
+        entry = {
+            "model": self.model,
+            "prompt_hash": self._cache_key(prompt),
+            "text": text,
+            "prompt_tokens": prompt_tokens,
+            "response_tokens": response_tokens,
+            "latency_s": latency_s,
+        }
+        self._write_cache_entry(entry)
+        if self._cache is not None:
+            self._cache[entry["prompt_hash"]] = entry
 
     def invoke(self, prompt: str, max_retries: int = 5) -> LLMResponse:
         """Invoke the LLM with a single-turn prompt.
@@ -133,25 +179,14 @@ class LLMClient:
         """
         import litellm
 
-        # L65: cache check before API. Lazy-load cache on first invoke.
-        if self.cache_path is not None:
-            if self._cache is None:
-                self._cache = self._load_cache()
-            key = self._cache_key(prompt)
-            if key in self._cache:
-                entry = self._cache[key]
-                self._total_invocations += 1
-                self._total_prompt_tokens += entry["prompt_tokens"]
-                self._total_response_tokens += entry["response_tokens"]
-                # cached latency is the original measurement (replay timer is 0)
-                return LLMResponse(
-                    text=entry["text"],
-                    prompt_tokens=entry["prompt_tokens"],
-                    response_tokens=entry["response_tokens"],
-                    latency_s=entry.get("latency_s", 0.0),
-                    model=entry["model"],
-                    raw_response=None,
-                )
+        # Cache check before API. cache_lookup is shared with the
+        # router's async path — sync and async share one cache.
+        cached = self.cache_lookup(prompt)
+        if cached is not None:
+            self._total_invocations += 1
+            self._total_prompt_tokens += cached.prompt_tokens
+            self._total_response_tokens += cached.response_tokens
+            return cached
 
         for attempt in range(max_retries):
             t0 = time.time()
@@ -177,20 +212,9 @@ class LLMClient:
                 self._total_response_tokens += response_tokens
                 self._total_latency += latency
 
-                # L65: write cache entry after successful API call so
-                # subsequent matched-pair runs can hit the cache.
-                if self.cache_path is not None:
-                    entry = {
-                        "model": self.model,
-                        "prompt_hash": self._cache_key(prompt),
-                        "text": text,
-                        "prompt_tokens": prompt_tokens,
-                        "response_tokens": response_tokens,
-                        "latency_s": latency,
-                    }
-                    self._write_cache_entry(entry)
-                    if self._cache is not None:
-                        self._cache[entry["prompt_hash"]] = entry
+                # Write cache entry via the shared public helper so
+                # subsequent matched-pair runs (sync OR async) hit cache.
+                self.cache_write(prompt, text, prompt_tokens, response_tokens, latency)
 
                 return LLMResponse(
                     text=text,

@@ -4,13 +4,13 @@ The TAAS round-1 reviewer panel mandated a perturbation experiment that
 exercises the calibration→assignment→evaluation loop under environmental
 shift (5-reviewer consensus). This file is the RED phase.
 
-Lessons applied:
-  L31 — TDD: every hook gets its failing test before any implementation.
-  L38 — Treatment verification: each test asserts the perturbation was
-        APPLIED, not just that the run succeeded.
-  L39 — Injection functions raise, not log-and-continue.
-  L41 — Failure perturbations target the critical path (one of two
-        backends, not both, not none).
+Design principles applied:
+  - TDD: every hook gets its failing test before any implementation.
+  - Treatment verification: each test asserts the perturbation was
+    APPLIED, not just that the run succeeded.
+  - Injection functions raise, not log-and-continue.
+  - Failure perturbations target the critical path (one of two
+    backends, not both, not none).
 """
 from __future__ import annotations
 
@@ -22,7 +22,7 @@ import pytest
 # ---------------------------------------------------------------------------
 
 def test_perturbation_spec_defaults_to_none():
-    """L38: a default-constructed perturbation must be a no-op."""
+    """A default-constructed perturbation must be a no-op (treatment-verifiable)."""
     from src.qoe import PerturbationSpec
     p = PerturbationSpec()
     assert p.kind == "none"
@@ -60,8 +60,8 @@ def test_perturbation_spec_latency_injection():
 
 
 def test_perturbation_spec_failure_injection():
-    """Backend-failure injection requires backend_to_fail (per L41:
-    target ONE of N backends, not all)."""
+    """Backend-failure injection requires backend_to_fail (target ONE
+    of N backends, not all — partial-degradation experiment)."""
     from src.qoe import PerturbationSpec
     p = PerturbationSpec(
         kind="failure_injection",
@@ -74,22 +74,22 @@ def test_perturbation_spec_failure_injection():
 
 
 def test_perturbation_spec_invalid_kind_raises():
-    """L39: injection functions must raise on invalid input, not
-    silently log-and-continue."""
+    """Injection functions must raise on invalid input, not silently
+    log-and-continue."""
     from src.qoe import PerturbationSpec
     with pytest.raises(ValueError, match=r"unknown perturbation kind"):
         PerturbationSpec(kind="garbage_kind").validate()
 
 
 def test_perturbation_spec_topic_restricted_requires_mask():
-    """L39: topic_restricted_cal without a topic_mask must raise."""
+    """topic_restricted_cal without a topic_mask must raise."""
     from src.qoe import PerturbationSpec
     with pytest.raises(ValueError, match=r"topic_mask is required"):
         PerturbationSpec(kind="topic_restricted_cal").validate()
 
 
 def test_perturbation_spec_latency_injection_requires_index_and_latency():
-    """L39: latency_injection without injection_event_index or
+    """latency_injection without injection_event_index or
     injected_latency_s must raise."""
     from src.qoe import PerturbationSpec
     with pytest.raises(ValueError, match=r"injection_event_index is required"):
@@ -105,8 +105,8 @@ def test_perturbation_spec_latency_injection_requires_index_and_latency():
 
 
 def test_perturbation_spec_failure_injection_requires_backend_and_index():
-    """L39 + L41: failure_injection requires both injection_event_index
-    and backend_to_fail (target ONE backend; not none, not all)."""
+    """failure_injection requires both injection_event_index and
+    backend_to_fail (target ONE backend; not none, not all)."""
     from src.qoe import PerturbationSpec
     with pytest.raises(ValueError, match=r"backend_to_fail is required"):
         PerturbationSpec(
@@ -155,7 +155,7 @@ def test_sample_calibration_events_no_perturbation(synthetic_d1_events):
 
 
 def test_sample_calibration_events_topic_restricted(synthetic_d1_events):
-    """L38 (treatment-verification): with topic_restricted_cal perturbation,
+    """Treatment-verification: with topic_restricted_cal perturbation,
     every event in the calibration sample must have ≥1 ground_truth label
     in the topic_mask. Non-mask topics must be excluded entirely."""
     from src.qoe import QoEAssigner, PerturbationSpec
@@ -174,9 +174,9 @@ def test_sample_calibration_events_topic_restricted(synthetic_d1_events):
     # Treatment: every sampled event must have at least one ground_truth in mask
     sampled_topics = {e.ground_truth[0] for e in sample}
     assert sampled_topics.issubset({"s0", "s1", "s2"}), (
-        f"L38: topic mask not respected. Sampled topics: {sampled_topics}"
+        f"topic mask not respected. Sampled topics: {sampled_topics}"
     )
-    assert len(sample) > 0, "L38 + L39: empty calibration sample is silent failure"
+    assert len(sample) > 0, "empty calibration sample is silent failure"
     # Sample size: cap at the number of in-mask events available, then apply fraction.
     # 100 events / 19 topics ≈ 5-6 events per topic; 3 topics → ~15-18 in-mask events.
     # 20% of 100 = 20 → capped at the in-mask pool.
@@ -187,7 +187,7 @@ def test_sample_calibration_events_topic_restricted(synthetic_d1_events):
 
 
 def test_sample_calibration_events_topic_restricted_empty_pool_raises(synthetic_d1_events):
-    """L39: if the topic_mask excludes ALL events (empty calibration pool),
+    """If the topic_mask excludes ALL events (empty calibration pool),
     raise ValueError rather than silently sampling zero events."""
     from src.qoe import QoEAssigner, PerturbationSpec
 
@@ -210,7 +210,7 @@ def test_sample_calibration_events_topic_restricted_empty_pool_raises(synthetic_
 # ---------------------------------------------------------------------------
 
 def test_apply_latency_injection_below_index():
-    """Treatment-verification (L38): for events with idx < injection_event_index,
+    """Treatment-verification: for events with idx < injection_event_index,
     the latency-injection helper returns 0 added latency (passthrough)."""
     from src.qoe import PerturbationSpec, apply_latency_injection
     perturbation = PerturbationSpec(
@@ -223,7 +223,7 @@ def test_apply_latency_injection_below_index():
 
 
 def test_apply_latency_injection_at_or_above_index():
-    """Treatment-verification (L38): for events with idx >= injection_event_index,
+    """Treatment-verification: for events with idx >= injection_event_index,
     the helper returns the configured latency offset."""
     from src.qoe import PerturbationSpec, apply_latency_injection
     perturbation = PerturbationSpec(
@@ -254,7 +254,7 @@ def test_apply_latency_injection_noop_for_other_kinds():
 # ---------------------------------------------------------------------------
 
 def test_is_backend_failed_targets_only_specified_backend():
-    """L41: failure-injection targets ONE of N backends. The other backend
+    """Failure-injection targets ONE of N backends. The other backend
     must NOT be marked as failed regardless of event_idx."""
     from src.qoe import PerturbationSpec, is_backend_failed
     perturbation = PerturbationSpec(
@@ -267,7 +267,7 @@ def test_is_backend_failed_targets_only_specified_backend():
     assert is_backend_failed(perturbation, "qwen2.5:7b", event_idx=10000) is True
     # Targeted backend, pre-injection: not failed
     assert is_backend_failed(perturbation, "qwen2.5:7b", event_idx=499) is False
-    # NON-targeted backend: never failed (L41 partial degradation)
+    # NON-targeted backend: never failed (partial degradation)
     assert is_backend_failed(perturbation, "qwen2.5:32b", event_idx=500) is False
     assert is_backend_failed(perturbation, "qwen2.5:32b", event_idx=10000) is False
 
@@ -296,7 +296,7 @@ def test_total_latency_offset_for_queue_no_perturbation():
 
 
 def test_total_latency_offset_for_queue_partial_post_injection():
-    """L38: with latency_injection at idx=50 + 0.1s offset, a queue with
+    """With latency_injection at idx=50 + 0.1s offset, a queue with
     event indices [40, 55, 60] should accumulate 0.1+0.1=0.2s (two
     post-injection events; the pre-injection event at idx=40 contributes 0)."""
     from src.qoe import PerturbationSpec, total_latency_offset_for_queue
@@ -331,7 +331,7 @@ def test_partition_queue_by_failure_no_perturbation():
 
 
 def test_partition_queue_by_failure_targeted_backend_post_injection():
-    """L41: failure_injection at idx=50 on backend 'qwen7b' splits events
+    """failure_injection at idx=50 on backend 'qwen7b' splits events
     into pre-injection (healthy → LLM call) and post-injection (failed
     → empty match). Only the targeted backend is affected."""
     from src.qoe import PerturbationSpec, partition_queue_by_failure
@@ -354,7 +354,7 @@ def test_partition_queue_by_failure_targeted_backend_post_injection():
 
 
 def test_partition_queue_by_failure_non_targeted_backend_unchanged():
-    """L41: a non-targeted backend (qwen32b) is NOT failed even
+    """A non-targeted backend (qwen32b) is NOT failed even
     post-injection — partial degradation."""
     from src.qoe import PerturbationSpec, partition_queue_by_failure
     perturbation = PerturbationSpec(

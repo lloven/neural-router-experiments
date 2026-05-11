@@ -1,4 +1,4 @@
-"""Per L61 (Synthetic-data helpers must preserve evaluation metric invariants):
+"""Synthetic-data helpers must preserve evaluation metric invariants:
 round-trip integration test on `_subsample_subscriptions`.
 
 Generates a duplicated subscription set, runs the full match→evaluate
@@ -20,7 +20,8 @@ from src.data import Subscription
 
 def test_duplicated_subscriptions_share_descriptions():
     """The duplication helper assigns new IDs but identical descriptions —
-    this is the precondition for the L61 metric artifact. Lock it in."""
+    this is the precondition for the ID-vs-description F1 metric artifact.
+    Lock it in."""
     from scripts.run_crossover import _subsample_subscriptions
 
     base = [Subscription(id=f"s{i}", name=f"S{i}", description=f"topic {i}") for i in range(5)]
@@ -30,7 +31,7 @@ def test_duplicated_subscriptions_share_descriptions():
     for s in dup:
         desc_to_ids.setdefault(s.description, []).append(s.id)
     # Every original description should be associated with multiple IDs after
-    # duplication; this is the invariant violation L61 is about.
+    # duplication; this is the metric-invariant violation under test.
     multi_id_count = sum(1 for ids in desc_to_ids.values() if len(ids) > 1)
     assert multi_id_count >= 1, "duplication should produce shared descriptions"
 

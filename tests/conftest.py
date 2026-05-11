@@ -32,7 +32,7 @@ def pytest_collection_modifyitems(config, items):
 def ssh_host():
     """SSH host alias for the remote VM. Override via NROUTER_SSH_HOST env var."""
     import os
-    return os.environ.get("NROUTER_SSH_HOST", "nrouter-vm")
+    return os.environ.get("NROUTER_SSH_HOST", "remote-host")
 
 
 @pytest.fixture

@@ -1,49 +1,63 @@
 # Neural Router Experiment Protocol
 
-This document describes the complete protocol for running Neural Router experiments, both locally and on a remote GPU VM. It covers setup, execution, monitoring, result collection, and troubleshooting.
+This document describes the protocol for reproducing the Neural Router
+experiments, both locally and on a remote GPU host. It covers setup,
+execution, monitoring, result collection, and troubleshooting.
 
 ## Overview
 
-The experiment pipeline is manifest-driven: a JSON manifest tracks all runs with atomic persistence. Runs are dispatched as subprocesses by the orchestrator (`scripts/run_all.py`), each executing `scripts/run_one.py` for a single (stage, dataset, config, seed, model) combination. Results are written incrementally to CSV files. The system supports crash recovery via manifest resume.
+The experiment pipeline is manifest-driven: a JSON manifest tracks all
+runs with atomic persistence. Runs are dispatched as subprocesses by the
+orchestrator (`scripts/run_all.py`), each executing `scripts/run_one.py`
+for a single `(stage, dataset, config, seed, model)` combination. Results
+are written incrementally to CSV files; the system supports crash
+recovery via manifest resume.
 
 ### Experiment types
 
-| Stage | Script | Purpose | Where to run |
-|---|---|---|---|
-| ablation | run_all.py | 7 configs x 3 datasets x 3 backends x 5 seeds | Local (API) + Remote (Ollama) |
-| sensitivity | run_all.py | 4 parameter sweeps x 3 datasets x 3 backends | Local (API) + Remote (Ollama) |
-| scaling | run_all.py | Event-count scaling up to 5000 | Remote (Ollama) |
-| crossover | run_all.py / run_crossover.py | A0 vs A4 under constrained context window | Remote (Ollama, requires GPU) |
-| qoe | run_all.py / run_qoe.py | Heterogeneous backend assignment | Remote (needs all 3 backends) |
-| baselines | run_all.py | BM25, SBERT, cross-encoder, TF-IDF, GloVe, Word2Vec, BART-MNLI | Local (CPU/GPU, no API) |
+| Stage       | Script                          | Purpose                                                              | Where to run                   |
+|-------------|---------------------------------|----------------------------------------------------------------------|--------------------------------|
+| ablation    | `run_all.py`                    | 7 configs × 3 datasets × 3 backends × 5 seeds                        | Local (API) + Remote (Ollama)  |
+| sensitivity | `run_all.py`                    | 4 parameter sweeps × 3 datasets × 3 backends                         | Local (API) + Remote (Ollama)  |
+| scaling     | `run_all.py`                    | Event-count scaling up to 5,000                                      | Remote (Ollama)                |
+| crossover   | `run_all.py` / `run_crossover.py`| A0 vs A4 under a constrained context window                          | Remote (Ollama, requires GPU)  |
+| qoe         | `run_all.py` / `run_qoe.py`     | Heterogeneous backend assignment                                     | Remote (requires all backends) |
+| baselines   | `run_all.py`                    | BM25, SBERT, cross-encoder, TF-IDF, GloVe, Word2Vec, BART-MNLI       | Local (CPU/GPU, no API)        |
 
-### Test levels (per L24)
+### Test levels
 
-| Level | Mode | Scope | Duration | When to use |
-|---|---|---|---|---|
-| Unit smoke | `unit_smoke` | 20 events, 2 configs, 1 dataset, 1 seed | Seconds | After any code change |
-| Integration smoke | `integration_smoke` | 100 events, 3 configs, 3 datasets, 1 seed | Minutes | Before deploying to VM |
-| Full | `full` | All events, 7 configs, 3 datasets, 5 seeds | Hours-days | Final experiment run |
+The pipeline supports three levels that share the same code paths and
+differ only in scope. Run the smaller levels first when iterating; each
+catches the failure modes of the next.
+
+| Level             | `mode`              | Scope                                       | Duration   | When to use                          |
+|-------------------|---------------------|---------------------------------------------|------------|--------------------------------------|
+| Unit smoke        | `unit_smoke`        | 20 events, 2 configs, 1 dataset, 1 seed     | Seconds    | After any code change                |
+| Integration smoke | `integration_smoke` | 100 events, 3 configs, 3 datasets, 1 seed   | Minutes    | Before deploying to a remote host    |
+| Full              | `full`              | All events, 7 configs, 3 datasets, 5 seeds  | Hours-days | Final experimental run               |
 
 ## Configuration
 
-### params.yaml (root source of truth)
+### `params.yaml` (root source of truth)
 
 Switch test level by changing `mode`:
+
 ```yaml
 mode: full   # unit_smoke | integration_smoke | full
 ```
 
 Per-model cost control:
+
 ```yaml
 llm_models:
   sonnet:
     seed_override: [42]           # single seed (cost)
     max_events_override:
-      D2: 5000                    # 7.7% stratified subsample
+      D2: 5000                    # stratified subsample
 ```
 
-New experiment sections:
+Experiment sections:
+
 ```yaml
 crossover:
   sub_volumes: [50, 100, 200, 500, 1000, 2000]
@@ -51,9 +65,9 @@ crossover:
   max_context_tokens: 4096
 
 qoe:
-  strategies: [homogeneous_qwen, homogeneous_haiku, homogeneous_sonnet,
-               round_robin, qoe_accuracy_first, qoe_balanced, qoe_cost_first]
-  calibration_fraction: 0.1
+  strategies: [homogeneous, round_robin, qoe_optimised]
+  weight_presets: [accuracy_first, balanced, cost_first]
+  calibration_fraction: 0.10
 
 scaling_subs:
   sub_counts: [50, 100, 200, 500, 1000, 2000, 5000]
@@ -61,25 +75,28 @@ scaling_subs:
   fixed_events: 500
 ```
 
-### remote.yaml (VM connection)
+### `remote.yaml` (remote-host connection)
 
-Copy from `remote.yaml.example` and fill in:
+Copy from `remote.yaml.example` and fill in for your environment:
+
 ```yaml
-ssh_host: nrouter-vm           # SSH config alias
-remote_dir: ~/neural-router
-venv_path: ~/neural-router/.venv
+ssh_host: <SSH alias for your remote host>
+remote_dir: <path to checkout on the remote host>
+venv_path: <path to virtualenv on the remote host>
 ollama_model: qwen2.5:7b
 ```
 
-Or use environment variables: `NROUTER_SSH_HOST`, `NROUTER_REMOTE_DIR`, etc.
+Environment variables (`NROUTER_SSH_HOST`, `NROUTER_REMOTE_DIR`, etc.)
+override the file values.
 
-## Local Experiment Protocol
+## Local protocol
 
 ### Prerequisites
 
-- Python 3.10+ with venv at `.venv/`
-- Anthropic API key in `.env` or environment
-- For baselines: `transformers`, `sentence-transformers` installed
+- Python 3.10+ with a virtualenv at `.venv/`.
+- `ANTHROPIC_API_KEY` (and/or `OPENAI_API_KEY`) in `.env` or the environment
+  if running the API stages.
+- `transformers`, `sentence-transformers` installed for the baselines.
 
 ### Running locally
 
@@ -88,10 +105,10 @@ Or use environment variables: `NROUTER_SSH_HOST`, `NROUTER_REMOTE_DIR`, etc.
 .venv/bin/python scripts/run_all.py --mode unit_smoke --dry-run
 .venv/bin/python scripts/run_all.py --mode unit_smoke
 
-# 2. Integration smoke (before deploying)
+# 2. Integration smoke (before deploying to a remote host)
 .venv/bin/python scripts/run_all.py --mode integration_smoke
 
-# 3. Full run (API-only stages: ablation with Haiku/Sonnet)
+# 3. Full run, API-only stages (ablation with Haiku / Sonnet)
 .venv/bin/python scripts/run_all.py --mode full --ollama-slots 0 --api-slots 2
 
 # 4. Resume after interruption
@@ -101,11 +118,11 @@ Or use environment variables: `NROUTER_SSH_HOST`, `NROUTER_REMOTE_DIR`, etc.
 ### Monitoring locally
 
 ```bash
-# Watch the manifest
+# Live dashboard
 .venv/bin/python scripts/monitor.py
 
-# Check manifest directly
-python3 -c "
+# Inspect the manifest directly
+python -c "
 import json
 m = json.load(open('results/full/manifest.json'))
 runs = m['runs']
@@ -118,109 +135,82 @@ print(f'Done: {done}, Failed: {failed}, Pending: {pending}, Total: {len(runs)}')
 
 ### Slot management
 
-- `--ollama-slots N`: Max concurrent local Ollama runs (default 1, limited by GPU)
-- `--api-slots N`: Max concurrent API calls (default 2, limited by rate limits)
-- Set `--ollama-slots 0` when running locally without GPU (API-only mode)
+- `--ollama-slots N`: maximum concurrent local Ollama runs (default 1).
+- `--api-slots N`: maximum concurrent API calls (default 2).
+- Set `--ollama-slots 0` when running locally without a GPU.
 
-## Remote Experiment Protocol
+## Remote protocol
 
-### First-time VM setup
+### First-time host setup
 
 ```bash
-# 1. Configure SSH access (add to ~/.ssh/config)
-Host nrouter-vm
-    HostName <VM_IP>
-    User <username>
-    IdentityFile ~/.ssh/<key>
-
-# 2. Run automated setup (installs Python, Ollama, model, venv)
+# 1. Add your remote host to ~/.ssh/config
+# 2. Install Python, Ollama, the model, and create the venv:
 ./scripts/remote/setup-vm.sh
-
-# 3. Deploy code + data + env
+# 3. Deploy code, environment, and data:
 ./scripts/remote/deploy.sh --setup --env --data
 ```
 
-### Deployment protocol (before every experiment run)
+### Deployment (before every experiment run)
 
 ```bash
 # 1. Commit local changes
 git add -A && git commit -m "experiment update"
 
-# 2. Deploy to VM (git push + pull + dependency check + Ollama health)
+# 2. Deploy to the remote host
 ./scripts/remote/deploy.sh
 
-# Or with optional flags:
+# Optional flags
 ./scripts/remote/deploy.sh --env    # also transfer .env
 ./scripts/remote/deploy.sh --data   # also rsync data/
 ```
 
-The deploy script:
-1. Tests SSH connection
-2. Pushes code via git remote `vm`
-3. Pulls on VM (`git pull --ff-only`)
-4. Checks if `requirements.txt` changed, reinstalls if needed
-5. Verifies Ollama is running and model available
+`deploy.sh` tests the SSH connection, pushes code, pulls on the remote
+host, reinstalls dependencies if `requirements.txt` changed, and
+verifies that Ollama is running with the expected model.
 
-### Running experiments on VM
+### Running experiments remotely
 
 ```bash
-# Smoke test (always first!)
-./scripts/remote/run-experiments.sh smoke
-
-# Full experiment sweep
-./scripts/remote/run-experiments.sh full
-
-# Resume interrupted run
+./scripts/remote/run-experiments.sh smoke       # smoke test
+./scripts/remote/run-experiments.sh full        # full sweep
 ./scripts/remote/run-experiments.sh full --resume
-
-# Crossover experiments only
-./scripts/remote/run-experiments.sh crossover
-
-# Dry run (show plan, don't execute)
+./scripts/remote/run-experiments.sh crossover   # crossover only
 ./scripts/remote/run-experiments.sh full --dry-run
-
-# Skip code sync (if already deployed)
 ./scripts/remote/run-experiments.sh full --no-sync --resume
 ```
 
-All experiments run inside a named tmux session on the VM (`nrouter-smoke`, `nrouter-full`, `nrouter-crossover`). The script refuses to launch if a session already exists (preventing duplicate runs).
+Experiments run inside named `tmux` sessions on the remote host
+(`nrouter-smoke`, `nrouter-full`, `nrouter-crossover`); the script
+refuses to launch if a session already exists, preventing duplicate
+runs.
 
 ### Monitoring remote experiments
 
 ```bash
-# Quick status check
-./scripts/remote/run-experiments.sh status
-
-# Attach to tmux session
-ssh nrouter-vm -t 'tmux attach -t nrouter-full'
-
-# VM health check (SSH, GPU, Ollama, disk, manifest)
-./scripts/remote/check-vm.sh
+./scripts/remote/run-experiments.sh status        # quick status check
+ssh <host> -t 'tmux attach -t nrouter-full'       # attach to session
+./scripts/remote/check-vm.sh                      # health check
 ```
 
 ### Stopping remote experiments
 
 ```bash
-# Graceful stop (kills orchestrator + run_one processes + tmux sessions)
-./scripts/remote/run-experiments.sh stop
+./scripts/remote/run-experiments.sh stop          # graceful kill
 ```
 
 ### Collecting results
 
 ```bash
-# Pull all results
-./scripts/remote/collect-results.sh
-
-# Pull specific mode only
-./scripts/remote/collect-results.sh --mode full
-
-# Also pull logs
-./scripts/remote/collect-results.sh --mode full --logs
+./scripts/remote/collect-results.sh                       # everything
+./scripts/remote/collect-results.sh --mode full           # one mode only
+./scripts/remote/collect-results.sh --mode full --logs    # include logs
 ```
 
-Results are merged into the local `results/` directory via rsync. Conflicts are backed up with `.vm-backup` suffix.
+Results are merged into the local `results/` directory via `rsync`;
+conflicts are backed up with a `.vm-backup` suffix.
 
-## Manifest System
+## Manifest system
 
 ### Run ID format
 
@@ -229,6 +219,7 @@ Results are merged into the local `results/` directory via rsync. Conflicts are 
 ```
 
 Examples:
+
 ```
 ablation__D1__A3__seed42__qwen7b
 sensitivity__D2__sweep_k__seed0__haiku
@@ -243,7 +234,8 @@ pending → running → done
                   → failed (with error message)
 ```
 
-On crash recovery (`--resume`), stale `running` entries are reset to `pending`.
+On crash recovery (`--resume`), stale `running` entries are reset to
+`pending`.
 
 ### Result file paths
 
@@ -259,48 +251,50 @@ results/{mode}/qoe/qoe_{dataset}.csv
 
 ### API rate limit hit
 
-The orchestrator detects "usage limit" errors and logs them to `OPERATIONS_LOG.md`. To recover:
-1. Wait for rate limit reset (or add credits)
-2. Resume: `python scripts/run_all.py --mode full --resume`
-3. Failed runs are automatically retried on resume
+The orchestrator detects API rate-limit errors and writes a note to
+`OPERATIONS_LOG.md`. To recover, wait for the limit to reset (or add
+credits) and resume: `python scripts/run_all.py --mode full --resume`.
+Failed runs are retried on resume.
 
-### Stale "running" entries
+### Stale `running` entries
 
-If the orchestrator crashes, some runs may be stuck as "running". On next launch with `--resume`, these are automatically reset to "pending".
+If the orchestrator crashes, runs may remain in the `running` state. On
+next launch with `--resume`, these are automatically reset to `pending`.
 
 ### Ollama out of memory
 
-If Qwen-7B runs OOM on the VM:
-1. Check GPU memory: `nvidia-smi`
-2. Kill stale Ollama processes: `pkill ollama`
-3. Restart: `ollama serve &`
-4. Resume experiments
+If a local model runs out of GPU memory: inspect with `nvidia-smi`, kill
+stale processes with `pkill ollama`, restart with `ollama serve &`, and
+resume the experiment.
 
-### Wrong model version
+### API model snapshot drift
 
-Record API model snapshot dates in results. Cloud models may change between runs. The `--mode unit_smoke` test can detect unexpected behavior changes.
+Record the API model snapshot identifiers in results. Cloud models may
+be updated by providers between runs; the unit-smoke test can detect
+unexpected behaviour changes.
 
 ### Manifest corruption
 
-The manifest uses atomic write (temp file + rename). If corruption occurs:
-1. Check `results/{mode}/manifest.json`
-2. Delete the manifest and regenerate: the orchestrator will create a new one and mark existing CSV files as `done` via `migrate_existing_results()`
+The manifest uses atomic write (temp file + rename). If a corrupted
+manifest does appear, delete it and let the orchestrator regenerate the
+state from existing CSV files via `migrate_existing_results()`.
 
-## Cost Control: Option B (2026-04-06)
+## Reproducibility checklist
 
-Configs A5 (event clustering) and A6 (no cosine filter) are **skipped on D2** to control API cost. Rationale: the paper's revised theory (discrimination capacity, Section 3.6) establishes that D2 (|S|=201) exceeds the LLM's discrimination capacity. All configs struggle equally on D2; A5/A6 add marginal insight at disproportionate cost (~$260 saved). The 22 skipped runs have status `skipped` in the manifest and are excluded from the submission checklist.
+Before publishing or sharing results:
 
-Remaining D2 ablation coverage: A0-A4 (Haiku 5 seeds, Sonnet 1 seed) + all 7 baselines. Sufficient for the cross-dataset comparison table and discrimination capacity analysis.
-
-## Checklist: Before Submitting Results
-
-- [ ] All non-skipped runs in manifest are `done` (no `pending` or `failed`; `skipped` is OK)
-- [ ] Smoke tests pass on both local and remote
-- [ ] Results collected from VM: `./scripts/remote/collect-results.sh --mode full`
-- [ ] Per-class F1 breakdown generated for D1 and D3
-- [ ] Wilcoxon signed-rank p-values computed
-- [ ] Crossover figure generated (A0 vs A4 at increasing |S|)
-- [ ] QoE results table populated
-- [ ] Machine specs confirmed (GPU model, VRAM, API model snapshot dates)
-- [ ] Sonnet single-seed caveat noted in all relevant tables
-- [ ] D2 A5/A6 skip noted in experiment section (Option B cost control)
+- [ ] All non-skipped runs in the manifest are `done` (no `pending`,
+      no `failed`; `skipped` is acceptable when justified).
+- [ ] Smoke tests pass both locally and on the remote host.
+- [ ] Results collected from the remote host:
+      `./scripts/remote/collect-results.sh --mode full`.
+- [ ] Per-class F1 breakdown generated for the relevant datasets.
+- [ ] Wilcoxon signed-rank p-values computed where reported.
+- [ ] Crossover figure generated (A0 vs A4 at increasing `|S|`).
+- [ ] QoE results table populated.
+- [ ] Machine specs confirmed (GPU model, VRAM, API model snapshot dates).
+- [ ] Single-seed caveats noted in any table that reports a single-seed
+      cell.
+- [ ] Any deliberate scope reductions (e.g. configurations skipped on a
+      particular dataset to control cost) noted in the experiment section
+      of the paper.

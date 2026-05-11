@@ -4,7 +4,7 @@
 #
 # DESIGN: No-fork watchdog. Reads /proc/loadavg directly without spawning
 # ps, grep, wc, or any subprocesses. Previous version used ps|wc which
-# became the cascade source under load (L44).
+# became the cascade source under load.
 #
 # Usage:
 #   nohup /path/to/watchdog.sh > /dev/null 2>&1 &

@@ -12,7 +12,7 @@
 #SBATCH --output=/scratch/project_2018951/neural-router/logs/cross-desc-%A_%a.out
 #SBATCH --error=/scratch/project_2018951/neural-router/logs/cross-desc-%A_%a.err
 # =============================================================================
-# D1 crossover, description-aware F1 — replaces the L61-flagged D1 sweep
+# D1 crossover, description-aware F1 — replaces the original D1 sweep
 # whose ID-based F1 collapse on duplication was a metric artifact.
 #
 # D1 native |S|=19; sweep targets |S| ∈ {50, 200, 2000} require duplication-
@@ -21,7 +21,7 @@
 # aware F1, the metric collapses both predictions and ground-truth to
 # description sets, so merging duplicates does not artifactually drop F1.
 # Description-aware F1 is the correct metric for any sub set with semantic-
-# duplicate IDs (Section 5.7, Lessons L61).
+# duplicate IDs (Section 5.7).
 #
 # Array layout (6 tasks):
 #   idx = sub_idx * 2 + cfg_idx

@@ -15,9 +15,9 @@
 # script flow + crossover signal direction at the most informative cell:
 # W=1024, |S|=127 (forces ~70% of native subs to be truncated by A0).
 #
-# Per L23: integration smoke runs at 50 events for ~3 min, full smoke
-# at 100 events for ~8 min. Default integration to keep accidental
-# re-submissions cheap.
+# Multi-level smoke testing: integration smoke runs at 50 events for
+# ~3 min, full smoke at 100 events for ~8 min. Default integration to
+# keep accidental re-submissions cheap.
 # =============================================================================
 
 set -eo pipefail

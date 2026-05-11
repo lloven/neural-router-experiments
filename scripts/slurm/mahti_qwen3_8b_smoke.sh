@@ -19,7 +19,7 @@
 #   * whether NeuralRouter end-to-end runs without crashing on the new prompt
 #     formatting / instruction-following Qwen-3 produces.
 #
-# Per L23/L32: smoke first, full second.
+# Multi-level smoke testing: smoke first, full second.
 #
 # Usage:
 #   sbatch scripts/slurm/mahti_qwen3_8b_smoke.sh
@@ -79,9 +79,9 @@ python scripts/run_experiment.py \
     --output-tag mahti_smoke_qwen3-8b \
     --output-dir $NR_ROOT/code/results/full/ablation/by_task/mahti_smoke_qwen3-8b
 
-# L30: validate the smoke result before declaring success.
+# Validate the smoke result before declaring success.
 echo
-echo "=== L30 content check ==="
+echo "=== CSV content check ==="
 SMOKE_CSV=$NR_ROOT/code/results/full/ablation/by_task/mahti_smoke_qwen3-8b/mahti_smoke_qwen3-8b_results.csv
 if [ -s "$SMOKE_CSV" ] && [ "$(wc -l < "$SMOKE_CSV")" -gt 1 ]; then
     echo "  CSV has data rows:"

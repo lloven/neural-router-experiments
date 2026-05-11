@@ -24,7 +24,7 @@ REPO_DIR="$(cd "$SCRIPT_DIR/../.." && pwd)"
 
 # --- Configuration -----------------------------------------------------------
 
-SSH_HOST="${NROUTER_SSH_HOST:-nrouter-vm}"
+SSH_HOST="${NROUTER_SSH_HOST:-remote-host}"
 REMOTE_DIR="${NROUTER_REMOTE_DIR:-~/neural-router}"
 
 # --- Helpers -----------------------------------------------------------------

@@ -1,4 +1,4 @@
-"""Tests for the no-fork watchdog script (L44).
+"""Tests for the no-fork watchdog script.
 
 The watchdog must:
 1. Read /proc/loadavg directly (no ps, grep, wc, pipe)

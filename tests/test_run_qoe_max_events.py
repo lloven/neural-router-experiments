@@ -1,4 +1,4 @@
-"""Verify scripts/run_qoe.py supports --max-events for L23 unit smoke.
+"""Verify scripts/run_qoe.py supports --max-events for unit-smoke runs.
 
 Required because the 2026-05-04 timeout-failed smokes used full-corpus
 single-points instead of progressive scaling. With --max-events the

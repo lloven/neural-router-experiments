@@ -10,8 +10,8 @@
 #   ./scripts/remote/deploy.sh --setup --env   # combine flags
 #
 # Prerequisites:
-#   - SSH access to VM via nrouter-vm alias
-#   - Git remote 'vm' configured: git remote add vm nrouter-vm:~/neural-router.git
+#   - SSH access to VM via remote-host alias
+#   - Git remote 'vm' configured: git remote add vm remote-host:~/neural-router.git
 # =============================================================================
 
 set -euo pipefail
@@ -21,7 +21,7 @@ REPO_DIR="$(cd "$SCRIPT_DIR/../.." && pwd)"
 
 # --- Configuration -----------------------------------------------------------
 
-SSH_HOST="${NROUTER_SSH_HOST:-nrouter-vm}"
+SSH_HOST="${NROUTER_SSH_HOST:-remote-host}"
 REMOTE_DIR="${NROUTER_REMOTE_DIR:-~/neural-router}"
 
 # --- Helpers -----------------------------------------------------------------

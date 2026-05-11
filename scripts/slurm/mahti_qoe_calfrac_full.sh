@@ -45,8 +45,8 @@ if ! $OLLAMA list | grep -q "^qwen2.5:32b"; then $OLLAMA pull qwen2.5:32b; fi
 
 cd $NR_ROOT/code
 FULL_OUT=$NR_ROOT/code/results/full/qoe_calfrac/by_task
-# L51: clean per-fraction output dirs to avoid schema drift across runs.
-# L53 prevention: stable 'frac_0.NN' naming preserves the dot so neither
+# Clean per-fraction output dirs to avoid schema drift across runs.
+# Flag-propagation: stable 'frac_0.NN' naming preserves the dot so neither
 # bash nor python need to reconstruct it from a numeric value.
 for FRAC in 0.05 0.10 0.20 0.50; do
     rm -rf "$FULL_OUT/frac_${FRAC}"
@@ -67,7 +67,7 @@ for FRAC in 0.05 0.10 0.20 0.50; do
         --output-dir "$FULL_OUT/frac_${FRAC}"
 done
 
-# L30 + L53 validation: every fraction wrote a CSV and the CSV records
+# Validation: every fraction wrote a non-empty CSV and the CSV records
 # the fraction value (so downstream analysis can group by it).
 for FRAC in 0.05 0.10 0.20 0.50; do
     CSV="$FULL_OUT/frac_${FRAC}/qoe_D1.csv"

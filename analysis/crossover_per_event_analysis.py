@@ -17,7 +17,7 @@ import matplotlib.pyplot as plt
 
 ROOT = Path(__file__).resolve().parent.parent
 BY_TASK = ROOT / "results" / "full" / "crossover_desc" / "by_task"
-OUT = ROOT.parent.parent / "Manuscripts" / "Neural Router (Elsevier FGCS)" / "figs"
+OUT = ROOT / "figs"
 
 S_VOLS = [50, 200, 2000]
 EFF = {50: 30, 200: 125, 2000: 133}  # |S|_eff after CoverAndMerge from CSV

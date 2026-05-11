@@ -18,7 +18,7 @@
 #   2. topic_restricted_cal              — calibration-domain shift
 #   3. latency_injection                 — mid-run latency shift
 #
-# Treatment-verification (L38): the 3 cells run in sequence with the SAME
+# Treatment-verification: the 3 cells run in sequence with the SAME
 # seed and dataset; the only difference is the perturbation kind. The CSV
 # must show distinct latency rows (latency_injection > baseline > offset).
 # Topic-restricted-cal must produce a different per-cluster assignment than
@@ -62,7 +62,7 @@ fi
 
 cd $NR_ROOT/code
 SMOKE_OUT=$NR_ROOT/code/results/full/qoe_perturbation/by_task/smoke
-# L51: ensure clean state — stale CSVs from a prior run with a different
+# Ensure clean state — stale CSVs from a prior run with a different
 # schema cause append-mode parser failures. Smoke output is cheap to rebuild.
 rm -rf $SMOKE_OUT
 mkdir -p $SMOKE_OUT
@@ -70,19 +70,19 @@ SHARED_FLAGS=(--dataset D1 --strategies homogeneous,qoe_optimised --weight-prese
     --seeds 42 --backends "tier_mid:ollama/qwen2.5:7b,tier_large:ollama/qwen2.5:32b" \
     --max-events 50 --calibration-fraction 0.10)
 
-# L38 step 1: baseline (no perturbation)
+# Step 1: baseline (no perturbation) — treatment-verifiable matched-pair
 echo "=== baseline (no perturbation) ==="
 python scripts/run_qoe.py "${SHARED_FLAGS[@]}" \
     --output-dir "$SMOKE_OUT/baseline"
 
-# L38 step 2: topic_restricted_cal (calibration sample restricted to 3 of 19 topics)
+# Step 2: topic_restricted_cal (calibration sample restricted to 3 of 19 topics)
 echo "=== topic_restricted_cal (mask = 3 of 19 topics) ==="
 python scripts/run_qoe.py "${SHARED_FLAGS[@]}" \
     --perturbation topic_restricted_cal \
     --topic-mask "sports,business_&_entrepreneurs,arts_&_culture" \
     --output-dir "$SMOKE_OUT/topic_restricted"
 
-# L38 step 3: latency_injection (extra 0.1s/event for events with idx >= 25)
+# Step 3: latency_injection (extra 0.1s/event for events with idx >= 25)
 echo "=== latency_injection (idx>=25, +0.1s/event) ==="
 python scripts/run_qoe.py "${SHARED_FLAGS[@]}" \
     --perturbation latency_injection \
@@ -90,7 +90,7 @@ python scripts/run_qoe.py "${SHARED_FLAGS[@]}" \
     --injected-latency-s 0.1 \
     --output-dir "$SMOKE_OUT/latency_injection"
 
-# L30: validate every cell wrote a CSV with at least 1 data row
+# Validate every cell wrote a CSV with at least 1 data row
 for sub in baseline topic_restricted latency_injection; do
     CSV="$SMOKE_OUT/$sub/qoe_D1.csv"
     if [ -s "$CSV" ] && [ "$(wc -l < "$CSV")" -gt 1 ]; then
@@ -101,7 +101,7 @@ for sub in baseline topic_restricted latency_injection; do
     fi
 done
 
-# L38 treatment-verification: latency_injection's wall-clock latency must
+# Treatment-verification: latency_injection's wall-clock latency must
 # be strictly greater than baseline's WHEN MATCHED BY (strategy, backend).
 # Comparing means across the unmatched cell-mix conflates the +0.1s/event
 # injection with the larger Ollama warmup variance on the 32B backend
@@ -121,13 +121,14 @@ for _, r in joined.iterrows():
     deltas.append(delta)
     print(f'  {label}: {r[\"latency_s_base\"]:.3f} -> {r[\"latency_s_lat\"]:.3f}  (delta {delta:+.3f}s)')
 # Treatment is verified if AT LEAST ONE matched cell shows delta > 0.5s.
-# (Single matched cell suffices for L38 — unmatched cells may show
-# warmup-dominated negative deltas that aren't injection-driven.)
+# (Single matched cell suffices for treatment-verification — unmatched
+# cells may show warmup-dominated negative deltas that aren't
+# injection-driven.)
 positive = [d for d in deltas if d > 0.5]
 if not positive:
-    print(f'FAIL L38 treatment-verification: no matched cell shows delta > 0.5s; deltas={deltas}')
+    print(f'FAIL treatment-verification: no matched cell shows delta > 0.5s; deltas={deltas}')
     sys.exit(1)
-print(f'PASS L38 treatment-verification: {len(positive)}/{len(deltas)} matched cells show delta > 0.5s')
+print(f'PASS treatment-verification: {len(positive)}/{len(deltas)} matched cells show delta > 0.5s')
 "
 
 echo "=== DONE qoe-perturbation smoke ==="

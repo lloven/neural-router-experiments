@@ -47,6 +47,7 @@ class AsyncLLMClient:
         api_key: Optional[str] = None,
         max_concurrent: int = 10,
         rate_limit_rpm: int = 500,
+        cache_path: Optional["Path | str"] = None,
     ):
         self.model = model
         self.temperature = temperature
@@ -55,10 +56,30 @@ class AsyncLLMClient:
         self._max_concurrent = max_concurrent
         self._rate_limit_rpm = rate_limit_rpm
         self._semaphore: Optional[asyncio.Semaphore] = None
+        # Shared LLM-call cache (sync + async). The cache file format
+        # is identical to LLMClient's (JSONL, sha1(model || prompt) keying)
+        # so sync and async clients can read each other's writes — single
+        # source of truth for matched-pair determinism.
+        from pathlib import Path
+        self.cache_path = Path(cache_path) if cache_path is not None else None
+        # Reuse LLMClient's cache helpers via composition rather than
+        # duplicating logic (DRY): a hidden LLMClient-shaped object holds
+        # the cache and exposes cache_lookup / cache_write.
+        from .llm import LLMClient
+        self._cache_helper = LLMClient(model=model, cache_path=cache_path)
         self._total_invocations = 0
         self._total_prompt_tokens = 0
         self._total_response_tokens = 0
         self._total_latency = 0.0
+
+    def cache_lookup(self, prompt: str):
+        """Delegate to the underlying LLMClient cache helper."""
+        return self._cache_helper.cache_lookup(prompt)
+
+    def cache_write(self, prompt: str, text: str, prompt_tokens: int,
+                    response_tokens: int, latency_s: float) -> None:
+        """Delegate to the underlying LLMClient cache helper."""
+        self._cache_helper.cache_write(prompt, text, prompt_tokens, response_tokens, latency_s)
 
     async def invoke_async(self, prompt: str) -> LLMResponse:
         """Invoke the LLM asynchronously (single prompt).
@@ -72,6 +93,14 @@ class AsyncLLMClient:
             An LLMResponse with the completion text and usage metadata.
         """
         import litellm
+
+        # Cache lookup before semaphore acquisition.
+        cached = self.cache_lookup(prompt)
+        if cached is not None:
+            self._total_invocations += 1
+            self._total_prompt_tokens += cached.prompt_tokens
+            self._total_response_tokens += cached.response_tokens
+            return cached
 
         if self._semaphore is None:
             self._semaphore = asyncio.Semaphore(self._max_concurrent)
@@ -96,6 +125,9 @@ class AsyncLLMClient:
                 self._total_prompt_tokens += prompt_tokens
                 self._total_response_tokens += response_tokens
                 self._total_latency += latency
+
+                # Write through to the shared cache for matched-pair runs.
+                self.cache_write(prompt, text, prompt_tokens, response_tokens, latency)
 
                 return LLMResponse(
                     text=text,

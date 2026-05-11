@@ -11,9 +11,9 @@
 #SBATCH --output=/scratch/project_2018951/neural-router/logs/qoe-pert-matched-%j.out
 #SBATCH --error=/scratch/project_2018951/neural-router/logs/qoe-pert-matched-%j.err
 # =============================================================================
-# C9 perturbation matched-pair re-run (post-L65 fix).
+# C9 perturbation matched-pair re-run (post seed-threading fix).
 # Runs baseline + topic_restricted_cal + latency_injection sequentially in
-# ONE SLURM job, sharing a single LLM-call cache. With the L65 seed-threading
+# ONE SLURM job, sharing a single LLM-call cache. With the seed-threading
 # fix in src/qoe.py, the 5 seeds now actually produce 5 different calibration
 # samples; the shared cache neutralises LLM nondeterminism between baseline
 # and perturbed cells (matched-cell semantics).
@@ -71,7 +71,7 @@ if ! $OLLAMA list | grep -q "^qwen2.5:32b"; then $OLLAMA pull qwen2.5:32b; fi
 cd $NR_ROOT/code
 OUT_BASE=$NR_ROOT/code/results/full/qoe_perturbation_matched
 LLM_CACHE=$OUT_BASE/llm_cache.jsonl
-# L51: clean state per run.
+# Clean state per run.
 rm -rf $OUT_BASE
 mkdir -p $OUT_BASE/by_task
 
@@ -110,7 +110,7 @@ python scripts/run_qoe.py "${SHARED_FLAGS[@]}" \
     --output-dir "$OUT_BASE/by_task/latency_injection"
 echo "  cache size: $(wc -l < $LLM_CACHE 2>/dev/null || echo 0) entries"
 
-# L30 validate.
+# Validate non-empty CSV (data row present).
 for sub in baseline topic_restricted latency_injection; do
     CSV="$OUT_BASE/by_task/$sub/qoe_D1.csv"
     if [ -s "$CSV" ] && [ "$(wc -l < "$CSV")" -gt 1 ]; then

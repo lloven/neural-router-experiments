@@ -9,7 +9,7 @@
 #   ./scripts/remote/setup-vm.sh
 #
 # Prerequisites:
-#   - SSH access to the VM via the nrouter-vm alias
+#   - SSH access to the VM via the remote-host alias
 #   - VM has Ubuntu 22.04+ with NVIDIA GPU
 # =============================================================================
 
@@ -20,7 +20,7 @@ REPO_DIR="$(cd "$SCRIPT_DIR/../.." && pwd)"
 
 # --- Configuration -----------------------------------------------------------
 
-SSH_HOST="${NROUTER_SSH_HOST:-nrouter-vm}"
+SSH_HOST="${NROUTER_SSH_HOST:-remote-host}"
 REMOTE_DIR="${NROUTER_REMOTE_DIR:-~/neural-router}"
 MODEL="${NROUTER_MODEL:-qwen2.5:7b}"
 
@@ -42,7 +42,7 @@ if ! ssh_vm "echo ok" >/dev/null 2>&1; then
     err "Cannot connect to ${SSH_HOST}. Check your SSH config."
     err "Expected SSH config entry:"
     err ""
-    err "  Host nrouter-vm"
+    err "  Host remote-host"
     err "      HostName <vm-ip-or-hostname>"
     err "      User <username>"
     err "      IdentityFile ~/.ssh/<key>"

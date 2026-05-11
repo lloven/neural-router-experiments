@@ -69,13 +69,14 @@ class PerturbationSpec:
         LLM call (treatment-verifiable via wall-clock).
       - ``failure_injection``: at event index ``injection_event_index``,
         the backend named ``backend_to_fail`` returns empty matches
-        (F1=0). Per L41: target one of N backends, not all.
+        (F1=0). Target one of N backends, not all — this is a partial
+        degradation experiment, not a total outage.
 
-    L38: every perturbation must be applied verifiably; ``is_noop()`` is
+    Every perturbation must be applied verifiably; ``is_noop()`` is
     the smoke-test contract that a default-constructed spec changes
     nothing.
 
-    L39: ``validate()`` raises on invalid configuration (missing required
+    ``validate()`` raises on invalid configuration (missing required
     fields per kind); never log-and-continue.
     """
     kind: str = "none"
@@ -90,8 +91,8 @@ class PerturbationSpec:
     def validate(self) -> "PerturbationSpec":
         """Raise ValueError if the spec is malformed for its kind.
 
-        Per L39, perturbation hooks must not silently swallow errors.
-        Returns self so callers can chain: ``spec = PerturbationSpec(...).validate()``.
+        Perturbation hooks must not silently swallow errors. Returns
+        self so callers can chain: ``spec = PerturbationSpec(...).validate()``.
         """
         if self.kind not in VALID_PERTURBATION_KINDS:
             raise ValueError(
@@ -119,7 +120,7 @@ class PerturbationSpec:
                 )
             if self.backend_to_fail is None:
                 raise ValueError(
-                    "backend_to_fail is required for kind='failure_injection' (L41: target one backend)"
+                    "backend_to_fail is required for kind='failure_injection' (target one backend)"
                 )
         return self
 
@@ -138,7 +139,7 @@ def apply_latency_injection(
         extra = apply_latency_injection(self.perturbation, event_idx)
         if extra > 0: time.sleep(extra)
 
-    L38: the per-event return value is the treatment-verifiable signal —
+    The per-event return value is the treatment-verifiable signal —
     a smoke test that compares pre-/post-injection wall-clock latencies
     asserts post >= pre + injected_latency_s for at least one cell.
     """
@@ -185,7 +186,8 @@ def partition_queue_by_failure(
     For ``failure_injection`` on the targeted backend, events with
     ``idx >= injection_event_index`` go into ``failed`` (LLM call skipped,
     empty match emitted); the rest go into ``healthy`` (LLM call as
-    normal). Per L41, a non-targeted backend's queue is entirely healthy.
+    normal). A non-targeted backend's queue is entirely healthy
+    (one-of-N partial degradation, not a total outage).
     Returns (healthy, failed) with original ordering preserved within
     each list.
     """
@@ -212,8 +214,8 @@ def is_backend_failed(
     ``event_idx >= injection_event_index`` and ``backend_name`` matches
     ``perturbation.backend_to_fail``. The QoE matching path treats a
     failed-backend cell as if the LLM returned an empty match
-    (F1=0 contribution); the assigner can then re-route per L41
-    (one-of-N partial degradation).
+    (F1=0 contribution); the assigner can then re-route across the
+    remaining healthy backends (one-of-N partial degradation).
     """
     if perturbation is None or perturbation.kind != "failure_injection":
         return False
@@ -368,7 +370,7 @@ def assign_qoe_optimised(
     before weighting. This replaces the earlier hardcoded
     `cost_max=20.0` / `latency_max=30.0` constants that saturated the
     cost and latency terms for self-hosted-model deployments
-    (cancelled job 6620413; see L63 / OPERATIONS_LOG B62).
+    (cancelled job 6620413).
 
     Args:
         calibration: Calibration results from the calibration phase.
@@ -436,12 +438,12 @@ class QoEAssigner:
         self.backends = backends
         self.weights = weights or dict(DEFAULT_WEIGHTS)
         self.calibration_fraction = calibration_fraction
-        # L65: thread the seed through every randomness source — calibration
+        # Thread the seed through every randomness source — calibration
         # sample selection (_sample_calibration_events) and inner RouterConfig
         # (calibrate). Without this, --seeds 42,123,... draws identical
         # samples and the 5-seed CI95 measures k-means + LLM jitter only.
         self.seed = seed
-        # C9: validate perturbation eagerly per L39; never log-and-continue.
+        # C9: validate perturbation eagerly; never log-and-continue.
         self.perturbation = (
             perturbation.validate() if perturbation is not None else None
         )
@@ -458,11 +460,11 @@ class QoEAssigner:
         With ``perturbation.kind == 'topic_restricted_cal'``: events are
         first filtered to those whose ground_truth intersects the
         ``perturbation.topic_mask``, then the fraction is applied to the
-        filtered pool. Per L38 this is the treatment whose application is
+        filtered pool. This is the treatment whose application is
         verifiable from the sample's topic distribution.
 
-        Per L39: an empty calibration pool (e.g., topic_mask matches no
-        events) raises ValueError rather than returning an empty sample.
+        An empty calibration pool (e.g., topic_mask matches no events)
+        raises ValueError rather than returning an empty sample.
         """
         import numpy as np
 
@@ -477,7 +479,7 @@ class QoEAssigner:
                 )
 
         n_sample = max(1, int(len(pool) * self.calibration_fraction))
-        # L65: use self.seed (threaded from outer per-seed loop), not a
+        # Use self.seed (threaded from outer per-seed loop), not a
         # hardcoded 42. Pre-fix this line silently disabled the 5-seed
         # variance source the manuscript implies.
         rng = np.random.RandomState(self.seed)
@@ -523,7 +525,7 @@ class QoEAssigner:
                     llm.reset_stats()
 
                 # Create a minimal router with A3 config for this backend.
-                # L65: thread self.seed (not hardcoded 42) so calibration's
+                # Thread self.seed (not hardcoded 42) so calibration's
                 # k-means partition varies across seeds.
                 config = RouterConfig(
                     **{

@@ -4,7 +4,7 @@ Required to honestly populate fig:cost-validation. The cost model claim
 (Eq. 4) is per-cluster: I = Σ_c ⌈m_c / b_max(c)⌉. Aggregate I is
 insufficient to validate this; we need per-cluster I_c and m_c.
 
-Per L60: figure data gap → fix the experiment (logging), not the figure.
+Figure data gap → fix the experiment (logging), not the figure.
 """
 from __future__ import annotations
 

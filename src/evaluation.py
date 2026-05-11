@@ -219,10 +219,10 @@ def evaluate_matches_description_aware(
 ) -> EvaluationResult:
     """Description-aware variant of `evaluate_matches`.
 
-    Per L61 (Synthetic-data helpers must preserve evaluation metric
-    invariants): when the subscription set contains multiple distinct IDs
-    that share a description (the duplication-with-rename setup used in
-    crossover sweeps to test |S| > native), ID-based F1 misclassifies
+    Synthetic-data helpers must preserve evaluation metric invariants:
+    when the subscription set contains multiple distinct IDs that share
+    a description (the duplication-with-rename setup used in crossover
+    sweeps to test |S| > native), ID-based F1 misclassifies
     correct semantic matches as misses if CoverAndMerge collapses
     duplicates and retains only one ID. Description-aware F1 fixes this
     by collapsing both predictions and ground truth to description-sets

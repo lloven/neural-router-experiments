@@ -11,16 +11,16 @@
 #SBATCH --output=/scratch/project_2018951/neural-router/logs/qoe-calfrac-matched-%j.out
 #SBATCH --error=/scratch/project_2018951/neural-router/logs/qoe-calfrac-matched-%j.err
 # =============================================================================
-# H4 calibration-fraction sweep matched-pair re-run (post-L65 fix).
+# H4 calibration-fraction sweep matched-pair re-run (post seed-threading fix).
 # Runs all 4 fractions {0.05, 0.10, 0.20, 0.50} sequentially in one job,
-# sharing a single LLM-call cache. With L65 seed-threading fix, the 5 seeds
+# sharing a single LLM-call cache. With the seed-threading fix, the 5 seeds
 # now produce 5 different calibration samples per fraction; with the cache,
 # eval-side LLM nondeterminism is neutralised across fractions and across
 # strategies (since hom/rr eval doesn't depend on frac).
 #
 # Pre-fix calfrac data (6628944-6628947, 6629336-6629337) is corrupted by
-# the L65 seed bug and discarded. Cleanly fill 6632888 (frac=0.50/seed=789,
-# 3 cells from the fix-time fill) merges in afterward via dedup.
+# the seed-threading bug and discarded. Cleanly fill 6632888 (frac=0.50/
+# seed=789, 3 cells from the fix-time fill) merges in afterward via dedup.
 #
 # Output: results/full/qoe_calfrac_matched/by_task/frac_{0.05,0.10,0.20,0.50}/
 # Cache : results/full/qoe_calfrac_matched/llm_cache.jsonl
@@ -83,7 +83,7 @@ for FRAC in 0.05 0.10 0.20 0.50; do
     echo "  cache size after frac=$FRAC: $(wc -l < $LLM_CACHE 2>/dev/null || echo 0) entries"
 done
 
-# L30 + L53 validate.
+# Validate non-empty CSV + flag round-trip.
 for FRAC in 0.05 0.10 0.20 0.50; do
     CSV="$OUT_BASE/by_task/frac_${FRAC}/qoe_D1.csv"
     if [ -s "$CSV" ] && [ "$(wc -l < "$CSV")" -gt 1 ]; then

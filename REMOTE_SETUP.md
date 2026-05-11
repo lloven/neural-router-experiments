@@ -69,7 +69,7 @@ python scripts/reconcile_puhti.py --dry-run
 python scripts/reconcile_puhti.py --apply
 ```
 
-The tool validates each per-task CSV per L30 (data row present, F1 non-null,
+The tool validates each per-task CSV (data row present, F1 non-null,
 config/dataset/seed match) before marking the manifest entry done.
 
 ## Important non-equivalence with the manuscript matrix
@@ -91,9 +91,9 @@ walltime is more than enough for D2 at full corpus on A100s.
 
 | Host | SSH alias | GPU | Status |
 |---|---|---|---|
-| vgpu-host | `nrouter-vm` | RTX 2080 Ti | Disk-full / crashing |
-| vgpu-host | `nrouter-vm` | RTX 2080 Ti | BLOCKED on Python |
-| vgpu-host | `nrouter-vm` | RTX 2080 Ti | UNREACHABLE |
+| vgpu-host | `remote-host` | RTX 2080 Ti | Disk-full / crashing |
+| vgpu-host | `remote-host` | RTX 2080 Ti | BLOCKED on Python |
+| vgpu-host | `remote-host` | RTX 2080 Ti | UNREACHABLE |
 
 Symptoms (2026-04-07 to 2026-04-09): Python imports hung on `.pyc` writes
 because the container disk was full; NFS retries piled up, load average

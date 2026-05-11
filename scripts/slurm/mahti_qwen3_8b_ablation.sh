@@ -41,7 +41,7 @@
 # Cost estimate: ~30-60 GPU-h on A100, well under 1% of the 250k BU envelope.
 #
 # Usage:
-#   # 1. Run the smoke first (REQUIRED, per L32):
+#   # 1. Run the smoke first (REQUIRED — never run full without a passing smoke):
 #   sbatch scripts/slurm/mahti_qwen3_8b_smoke.sh
 #   # 2. Verify the smoke output before proceeding.
 #   # 3. Submit the array:

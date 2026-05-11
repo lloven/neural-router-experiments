@@ -12,11 +12,11 @@ LLMResponse without invoking the API. This neutralises LLM-nondeterminism
 across SLURM jobs so that baseline-vs-perturbed comparisons measure the
 intended treatment.
 
-Lessons applied:
-  L31 — TDD: every cache feature gets a failing test before implementation.
-  L51 — Failure must propagate: a corrupted cache entry must raise, not
-        silently return stale data.
-  L65 — Statistical theatre: stochasticity sources must be traceable.
+Design principles applied:
+  - TDD: every cache feature gets a failing test before implementation.
+  - Failure must propagate: a corrupted cache entry must raise, not
+    silently return stale data.
+  - Stochasticity sources must be traceable (no hidden randomness).
 """
 from __future__ import annotations
 
@@ -158,7 +158,7 @@ def test_cache_preserves_token_counts_and_latency_replay(tmp_path):
 
 
 def test_corrupt_cache_entry_raises(tmp_path):
-    """L51: a corrupted cache file (malformed JSONL) must raise on first
+    """A corrupted cache file (malformed JSONL) must raise on first
     read, not silently return stale or wrong data."""
     from src.llm import LLMClient
     cache = tmp_path / "llm_cache.jsonl"

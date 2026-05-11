@@ -71,8 +71,9 @@ def test_aggregate_perturbation_matched_delta(tmp_path):
 
 
 def test_aggregate_calfrac_round_trips_fraction(tmp_path):
-    """Per L53: the calibration_fraction values from the CSVs must
-    appear in the summary keys with the exact float values."""
+    """The calibration_fraction values from the CSVs must appear in
+    the summary keys with the exact float values (no float-string
+    normalization mismatches)."""
     from analysis.qoe_perturbation_summary import aggregate_calfrac
     for frac in (0.05, 0.10, 0.20, 0.50):
         rows = [

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Cost-model validation runner: re-runs a small (config × k) grid with the
 new per-cluster logging in place so fig:cost-validation can plot honest
-predicted-vs-measured I per cluster (per L60).
+predicted-vs-measured I per cluster (figures justify load-bearing claims).
 
 Each row of the output CSV carries:
 - aggregate metrics (f1, invocations, latency_s, tokens_*, cost_per_1k)

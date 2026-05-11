@@ -1,7 +1,7 @@
-"""Generate manuscript figures for Neural Router (Elsevier FGCS).
+"""Generate manuscript figures for Neural Router.
 
-Output PDFs go to ../Manuscripts/Neural Router (Elsevier FGCS)/figs/.
-All figures use matplotlib with deterministic styling — no GUI tools (L33).
+Output PDFs go to `figs/`. All figures use matplotlib with deterministic
+styling — no GUI tools (headless backend).
 
 Figures produced:
   fig:k-sensitivity            -> figs/k_sensitivity.pdf
@@ -21,7 +21,7 @@ from pathlib import Path
 import pandas as pd
 import numpy as np
 import matplotlib
-matplotlib.use("Agg")  # headless, no GUI per L33
+matplotlib.use("Agg")  # headless backend, no GUI
 import matplotlib.pyplot as plt
 
 # Paper-style defaults
@@ -141,7 +141,7 @@ def fig_embedding_sensitivity():
 # ---------------------------------------------------------------------------
 # fig:cost-validation — per-cluster predicted vs measured I.
 #
-# Per L60: this figure justifies the §3.5/§4.6 empirical-validation claim
+# This figure justifies the §3.5/§4.6 empirical-validation claim
 # for the cost model I = Σ_c ⌈m_c / b_max(c)⌉. Each marker is one cluster
 # from the cost-validation re-run: we predict I_pred = ⌈m_c / b_max(|S_c|)⌉
 # and compare against the measured per-cluster invocation count I_meas.
@@ -210,7 +210,7 @@ def fig_cost_validation():
 # The empirical 5000-event point from qwen7b_scale_evt5000_D3 is intentionally
 # excluded: its ~1.5 events/call batching does not match the ~5-7 events/call
 # of the 50..2000 sweep, so combining them would conflate two regimes.
-# Locked by tests/test_figure_data_consistency.py (per L60).
+# Locked by tests/test_figure_data_consistency.py.
 # ---------------------------------------------------------------------------
 def fig_scaling():
     csv = SCALE / "qwen7b_scaling_events_D3" / "scaling_events_D3.csv"
@@ -357,9 +357,9 @@ def fig_crossover():
     """Render the empirical crossover sweep, if its data files exist.
 
     Prefers the description-aware results (crossover_desc/) over the
-    legacy ID-based results that were retired after the L61 metric-
-    artifact diagnosis (2026-05-04). Falls back to the legacy dirs only
-    if no desc-aware data has landed yet.
+    legacy ID-based results that were retired after the metric-artifact
+    diagnosis (2026-05-04). Falls back to the legacy dirs only if no
+    desc-aware data has landed yet.
     """
     candidates = [
         Path("results/full/crossover_desc/by_task"),
@@ -497,10 +497,11 @@ def fig_qoe_perturbation():
     95% CI across seeds); (b) latency Δ for latency_injection vs baseline
     by (strategy, backend), matched-cell.
     """
+    # Use merged n=15 CSVs (n=5 originals + n=10 boost; see analysis/merge_boost.py).
     perturbation_dirs = {
-        "baseline": "results/full/qoe_perturbation/by_task/baseline/qoe_D1.csv",
-        "topic_restricted": "results/full/qoe_perturbation/by_task/topic_restricted/qoe_D1.csv",
-        "latency_injection": "results/full/qoe_perturbation/by_task/latency_injection/qoe_D1.csv",
+        "baseline": "results/full/qoe_perturbation/by_task/baseline/qoe_D1_merged.csv",
+        "topic_restricted": "results/full/qoe_perturbation/by_task/topic_restricted/qoe_D1_merged.csv",
+        "latency_injection": "results/full/qoe_perturbation/by_task/latency_injection/qoe_D1_merged.csv",
     }
     frames = []
     for label, path in perturbation_dirs.items():
@@ -513,9 +514,14 @@ def fig_qoe_perturbation():
         frames.append(df)
     plot_df = pd.concat(frames, ignore_index=True)
 
-    fig, axes = plt.subplots(1, 2, figsize=(7.0, 3.0))
+    # Compact 2-panel layout matching fig:scaling / fig:crossover convention:
+    # F1 as a line plot (one line per strategy) for visual harmonization
+    # with the rest of the body figures; latency delta as compact vertical
+    # bars on the right.
+    fig, axes = plt.subplots(1, 2, figsize=(5.5, 1.9), gridspec_kw={"width_ratios": [1.1, 1.0]})
 
-    # Panel (a): F1 by perturbation × strategy with 95% CI
+    # Panel (a): F1 line plot — perturbation kind on x (ordered categorical),
+    # one line per strategy, error bars = 95% CI across seeds.
     ax = axes[0]
     summary = plot_df.groupby(["perturbation", "strategy"]).agg(
         f1_mean=("f1", "mean"),
@@ -525,21 +531,26 @@ def fig_qoe_perturbation():
     summary["f1_ci95"] = 1.96 * summary["f1_std"] / summary["n"].clip(lower=1).pow(0.5)
     perturbations = ["baseline", "topic_restricted", "latency_injection"]
     strategies = ["homogeneous", "round_robin", "qoe_optimised"]
-    width = 0.25
-    x = list(range(len(perturbations)))
-    for i, strat in enumerate(strategies):
+    markers = {"homogeneous": "o", "round_robin": "s", "qoe_optimised": "^"}
+    x_pos = list(range(len(perturbations)))
+    for strat in strategies:
         sub = summary[summary["strategy"] == strat].set_index("perturbation").reindex(perturbations)
-        ax.bar([xi + i * width for xi in x], sub["f1_mean"].values,
-               width=width, yerr=sub["f1_ci95"].values, capsize=3,
-               label=strat, alpha=0.85, edgecolor="black", linewidth=0.4)
-    ax.set_xticks([xi + width for xi in x])
-    ax.set_xticklabels(["baseline", "topic-restr.", "latency-inj."], rotation=20, ha="right", fontsize=8)
+        ax.errorbar(x_pos, sub["f1_mean"].values, yerr=sub["f1_ci95"].values,
+                    marker=markers[strat], capsize=3, label=strat,
+                    linewidth=1.2, markersize=4)
+    ax.set_xticks(x_pos)
+    ax.set_xticklabels(["baseline", "topic-restr.", "latency-inj."], fontsize=7)
     ax.set_ylabel("Macro-F1 (D1)", fontsize=8)
-    ax.legend(loc="upper right", fontsize=7)
-    ax.set_title("(a) F1 by perturbation × strategy", fontsize=8)
+    ax.legend(loc="lower right", fontsize=6, framealpha=0.85)
+    ax.set_title("(a) F1 by perturbation", fontsize=8)
     ax.tick_params(axis="y", labelsize=7)
+    ax.tick_params(axis="x", labelsize=7)
+    ax.grid(alpha=0.3, linewidth=0.4)
 
-    # Panel (b): latency delta (latency_injection - baseline) by (strategy, backend)
+    # Panel (b): matched-cell latency delta — vertical bars, focused on the
+    # mixed-backend strategies (where the +25s injection signal is clean).
+    # Single-backend cells are dominated by GPU cold-start ordering and
+    # excluded for clarity (numerical detail in body text).
     ax = axes[1]
     base = plot_df[plot_df["perturbation"] == "baseline"]
     lat = plot_df[plot_df["perturbation"] == "latency_injection"]
@@ -554,18 +565,21 @@ def fig_qoe_perturbation():
     delta_summary["delta_ci95"] = (
         1.96 * delta_summary["delta_std"] / delta_summary["n"].clip(lower=1).pow(0.5)
     )
-    labels = [f"{r['strategy'][:8]}/{r['backend']}" for _, r in delta_summary.iterrows()]
-    ax.barh(range(len(delta_summary)), delta_summary["delta_mean"].values,
-            xerr=delta_summary["delta_ci95"].values, capsize=3,
-            color="C3", alpha=0.85, edgecolor="black", linewidth=0.4)
-    ax.set_yticks(range(len(delta_summary)))
-    ax.set_yticklabels(labels, fontsize=7)
-    ax.axvline(0, color="black", linewidth=0.6, linestyle="--", alpha=0.5)
-    ax.set_xlabel(r"Δ latency_s (lat. inj. − baseline)", fontsize=8)
-    ax.set_title("(b) Matched-cell latency delta", fontsize=8)
-    ax.tick_params(axis="x", labelsize=7)
+    # Subset to mixed-backend (clean signal): round_robin and qoe_optimised.
+    clean = delta_summary[delta_summary["backend"] == "mixed"].reset_index(drop=True)
+    labels_b = [r["strategy"].replace("_", "\n") for _, r in clean.iterrows()]
+    ax.bar(range(len(clean)), clean["delta_mean"].values,
+           yerr=clean["delta_ci95"].values, capsize=3,
+           color=["C1", "C2"], alpha=0.85, edgecolor="black", linewidth=0.4, width=0.6)
+    ax.set_xticks(range(len(clean)))
+    ax.set_xticklabels(labels_b, fontsize=7)
+    ax.axhline(0, color="black", linewidth=0.5, linestyle="--", alpha=0.5)
+    ax.axhline(25, color="grey", linewidth=0.5, linestyle=":", alpha=0.6)
+    ax.set_ylabel(r"$\Delta L$ (s, matched-cell)", fontsize=8)
+    ax.set_title("(b) Latency-injection $\\Delta L$", fontsize=8)
+    ax.tick_params(axis="y", labelsize=7)
 
-    plt.tight_layout()
+    plt.tight_layout(pad=0.4)
     fig.savefig(OUT / "qoe_perturbation.pdf")
     plt.close(fig)
     print(f"  saved qoe_perturbation.pdf ({len(plot_df)} rows across 3 perturbations)")
@@ -578,17 +592,30 @@ def fig_qoe_calfrac():
     strategy. Hypothesis: QoE-optimised's line crosses round-robin's
     around 0.20–0.50, validating the calibration-noise-limited claim.
     """
-    base = Path("results/full/qoe_calfrac/by_task")
-    fraction_dirs = sorted([p for p in base.glob("frac_*") if (p / "qoe_D1.csv").exists()])
+    # Read merged n=15 CSVs at boosted fractions {0.05, 0.10, 0.20, 0.50}; for
+    # {0.80, 1.00} the merged file is identical to the original n=5 (boost2 in
+    # flight). Only non-_boost dirs are picked up so we don't double-count.
+    base = Path("results/full/qoe_calfrac_matched/by_task")
+    fraction_dirs = sorted(
+        [
+            p
+            for p in base.glob("frac_*")
+            if p.is_dir()
+            and not p.name.endswith("_boost")
+            and not p.name.endswith("_tail")
+            and (p / "qoe_D1_merged.csv").exists()
+        ]
+    )
     if not fraction_dirs:
         print("  fig:qoe-calfrac SKIPPED — no qoe_calfrac CSVs found")
         return
 
     frames = []
     for d in fraction_dirs:
-        df = pd.read_csv(d / "qoe_D1.csv")
-        # The fraction is recorded in the CSV per L53 — read it from there,
-        # don't re-parse the directory name.
+        df = pd.read_csv(d / "qoe_D1_merged.csv")
+        # The fraction is recorded in the CSV — read it from there,
+        # don't re-parse the directory name (avoids float-string normalization
+        # mismatches like '0.10' vs '0.1').
         if "calibration_fraction" not in df.columns:
             print(f"  fig:qoe-calfrac SKIPPED — {d} missing calibration_fraction column")
             return
@@ -602,7 +629,7 @@ def fig_qoe_calfrac():
     ).reset_index()
     summary["f1_ci95"] = 1.96 * summary["f1_std"] / summary["n"].clip(lower=1).pow(0.5)
 
-    fig, ax = plt.subplots(figsize=(4.0, 2.8))
+    fig, ax = plt.subplots(figsize=(5.0, 1.9))
     strategy_color = {"homogeneous": "C0", "round_robin": "C2", "qoe_optimised": "C3"}
     for strat, color in strategy_color.items():
         sub = summary[summary["strategy"] == strat].sort_values("calibration_fraction")

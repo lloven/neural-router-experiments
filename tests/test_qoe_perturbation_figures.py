@@ -4,8 +4,8 @@ These tests don't actually render PDFs (matplotlib is heavy); they verify
 the data-handling logic the figure functions rely on (matched-cell delta,
 fraction-from-CSV, graceful handling of missing data).
 
-Per L60: figures must justify a manuscript claim — these tests pin the
-data invariants the captions will state.
+Figures must justify a manuscript claim — these tests pin the data
+invariants the captions will state.
 """
 from __future__ import annotations
 
@@ -23,7 +23,7 @@ def _write_qoe_csv(path: Path, rows: list[dict]) -> None:
 
 
 def test_fig_qoe_perturbation_skips_when_data_missing(tmp_path, monkeypatch):
-    """L30: figure function must SKIP cleanly (not crash) when one of the
+    """Figure function must SKIP cleanly (not crash) when one of the
     three perturbation CSVs is missing — auto-pipeline robustness."""
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
     monkeypatch.chdir(tmp_path)
@@ -78,9 +78,10 @@ def test_qoe_perturbation_matched_cell_delta(tmp_path, monkeypatch):
 
 
 def test_qoe_calfrac_reads_calibration_fraction_from_csv(tmp_path, monkeypatch):
-    """Per L53: the figure must read `calibration_fraction` from the CSV
-    column, NOT reconstruct it from the directory name. This pins the
-    L53-prevention contract for downstream analysis."""
+    """The figure must read `calibration_fraction` from the CSV column,
+    NOT reconstruct it from the directory name. This pins the
+    flag-propagation contract for downstream analysis (avoids float-string
+    normalization mismatches like '0.10' vs '0.1')."""
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
     monkeypatch.chdir(tmp_path)
     # Write three fractions with non-stripped (legible) directory names
@@ -103,5 +104,5 @@ def test_qoe_calfrac_reads_calibration_fraction_from_csv(tmp_path, monkeypatch):
         float(pd.read_csv(p)["calibration_fraction"].unique()[0]) for p in paths
     })
     assert fractions_in_csv == [0.05, 0.10, 0.20], (
-        f"L53: CSV calibration_fraction values must round-trip exactly; got {fractions_in_csv}"
+        f"CSV calibration_fraction values must round-trip exactly; got {fractions_in_csv}"
     )

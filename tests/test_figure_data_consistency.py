@@ -2,7 +2,7 @@
 silently desync from the data they describe.
 
 The 2026-05-04 audit found three figures whose captions stated the opposite
-of what the data shows; this file is the regression net (per L60).
+of what the data shows; this file is the regression net.
 """
 from pathlib import Path
 import pandas as pd
@@ -148,7 +148,7 @@ def test_crossover_a0_plateaus_above_truncation_cap():
 
 def test_no_orphan_figures():
     """Every figure defined in the *body* files must be \\cref'd
-    (per L60: figures justify claims).
+    (figures must justify a claim).
 
     Supplementary-material figures (defined in `txt/Appendix.tex` and
     referenced from the body via textual citation form
@@ -157,7 +157,7 @@ def test_no_orphan_figures():
     from this scan: they're justified by the prose, not by `\\cref`.
     """
     import re
-    manuscript = ROOT.parent.parent / "Manuscripts" / "Neural Router (Elsevier FGCS)"
+    manuscript = ROOT.parent.parent / "Manuscripts" / "2026-NR — Neural Router"
     txt_dir = manuscript / "txt"
     main_tex = manuscript / "main.tex"
     # Body files only; Appendix.tex labels live in the supplement.
@@ -271,7 +271,7 @@ def test_pareto_a0_a4_compete_for_best_f1_per_backend():
 
 def test_scaling_caption_does_not_claim_stability():
     """fig:scaling caption must not contain 'remains stable' phrasing —
-    that was the 2026-05-04 audit finding (per L60).
+    that was the 2026-05-04 audit finding.
 
     Post-2026-05-06 the scaling panel is merged into fig:cost-panel; we
     now check the *full* figure block (master caption + all sub-captions)
@@ -279,7 +279,7 @@ def test_scaling_caption_does_not_claim_stability():
     declarative F1-decline narrative may live in any of these locations.
     """
     # ROOT = Experiments/neural-router; manuscript dir is .../FCG/Manuscripts/...
-    manuscript = ROOT.parent.parent / "Manuscripts" / "Neural Router (Elsevier FGCS)"
+    manuscript = ROOT.parent.parent / "Manuscripts" / "2026-NR — Neural Router"
     tex = (manuscript / "txt" / "Results.tex").read_text()
     import re
     # Locate the figure block containing fig:scaling (which is now a

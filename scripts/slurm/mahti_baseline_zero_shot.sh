@@ -13,7 +13,7 @@
 # =============================================================================
 # DistilBART-MNLI zero-shot baseline runner (gputest, 15 min cap).
 #
-# SMOKE_LEVEL parametric (per L23):
+# SMOKE_LEVEL parametric (multi-level smoke testing):
 #   integration: D2 with --max-events 50, ~30 s. Schema validation.
 #   d2         : D2 full corpus, ~10 min on A100, ~1.5 BU.
 #   d3         : D3 full corpus, ~3 min on A100, ~0.5 BU.
@@ -57,7 +57,7 @@ python scripts/run_baseline_zero_shot.py \
     --output $OUT_CSV \
     --model valhalla/distilbart-mnli-12-1
 
-# L30 content check.
+# CSV content check (data row present, not just file existence).
 if [ -s "$OUT_CSV" ] && [ "$(wc -l < "$OUT_CSV")" -gt 1 ]; then
     echo "PASS: BART CSV has data"
     head -2 "$OUT_CSV"

@@ -921,6 +921,17 @@ class NeuralRouter:
             return any(p in err_str for p in fatal_patterns)
 
         async def _invoke_one(prompt: str) -> LLMResponse:
+            # Honour self.llm.cache_path so the inline async path
+            # participates in the matched-pair LLM cache. Sync and async
+            # share one cache file, keyed on (model, prompt).
+            # Gate on cache_path being set (not just hasattr) so test
+            # mocks of LLMClient don't accidentally short-circuit the API.
+            cached = None
+            if getattr(self.llm, "cache_path", None) is not None:
+                cached = self.llm.cache_lookup(prompt)
+            if cached is not None:
+                return cached
+
             max_retries = 5
             for attempt in range(max_retries):
                 async with semaphore:
@@ -940,6 +951,11 @@ class NeuralRouter:
                         prompt_tokens = response.usage.prompt_tokens if response.usage else 0
                         response_tokens = response.usage.completion_tokens if response.usage else 0
                         latency = time.time() - t0
+                        # Cache_write is a no-op if the LLMClient has no cache_path.
+                        if getattr(self.llm, "cache_path", None) is not None:
+                            self.llm.cache_write(
+                                prompt, text, prompt_tokens, response_tokens, latency,
+                            )
                         return LLMResponse(
                             text=text,
                             prompt_tokens=prompt_tokens,

@@ -89,9 +89,9 @@ python scripts/run_experiment.py \
     --output-tag "$SMOKE_TAG" \
     --output-dir "$SMOKE_OUT"
 
-# L30 content check.
+# CSV content check.
 echo
-echo "=== L30 content check ==="
+echo "=== CSV content check ==="
 SMOKE_CSV=$SMOKE_OUT/${SMOKE_TAG}_results.csv
 if [ -s "$SMOKE_CSV" ] && [ "$(wc -l < "$SMOKE_CSV")" -gt 1 ]; then
     echo "  CSV has data rows:"

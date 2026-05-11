@@ -4,8 +4,8 @@ The tool reads CSVs that the SLURM array job (puhti_qwen7b_ablation.sh) writes
 to /scratch/project_2018951/neural-router/code/results/full/ablation/by_task/
 and updates the local manifest with status=done + metrics for matching runs.
 
-L30 enforced: a CSV without a data row, or with empty/null F1, must NOT be
-treated as done.
+Content enforcement: a CSV without a data row, or with empty/null F1,
+must NOT be treated as done.
 
 TDD RED phase: tests written before implementation.
 """
@@ -98,7 +98,7 @@ def _good_csv(path: Path, config: str, dataset: str, seed: int, f1: float = 0.66
 
 
 def _empty_csv(path: Path) -> None:
-    """Write a CSV with header only, no data rows (silent-failure mode per L30)."""
+    """Write a CSV with header only, no data rows (silent-failure mode)."""
     path.parent.mkdir(parents=True, exist_ok=True)
     pd.DataFrame(columns=[
         "config", "dataset", "seed", "f1", "precision", "recall", "fpr",
@@ -147,7 +147,7 @@ def test_task_dir_to_run_id_unknown_format_returns_none():
 
 
 # ---------------------------------------------------------------------------
-# 2. CSV validation (L30: content, not just existence)
+# 2. CSV validation (content, not just existence)
 # ---------------------------------------------------------------------------
 
 
@@ -179,7 +179,7 @@ def test_validate_csv_rejects_missing(tmp_path: Path):
 
 
 def test_validate_csv_rejects_null_f1(tmp_path: Path):
-    """Per L30: a row with null F1 is a silent failure, not done."""
+    """A row with null F1 is a silent failure, not done."""
     from scripts.reconcile_puhti import validate_csv
 
     csv = tmp_path / "qwen7b_D1_A3_s42_results.csv"

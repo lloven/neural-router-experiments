@@ -14,9 +14,9 @@
 # =============================================================================
 # Crossover empirical sweep on D2 native — re-execution of §5.7 on a
 # distribution where every subscription has a UNIQUE description, so
-# ID-based F1 is the correct metric (no L61 duplication-with-rename
-# artifact). Replaces the D1-with-duplication sweep whose negative result
-# was traced to a metric artifact, not the cost model.
+# ID-based F1 is the correct metric (no duplication-with-rename artifact).
+# Replaces the D1-with-duplication sweep whose negative result was traced
+# to a metric artifact, not the cost model.
 #
 # D2 has 127 native subscriptions with unique descriptions. With W=4096
 # the prompt fits all 127 subs (no truncation, no crossover). To exercise

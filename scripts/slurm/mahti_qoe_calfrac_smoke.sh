@@ -14,7 +14,7 @@
 # H4 calibration-fraction smoke (gputest, 15 min): TAAS round-1 dual-reviewer
 # (TAAS-1, AI-3) recommendation. Validates the --calibration-fraction CLI
 # wiring with two distinct fraction values and confirms the fraction
-# propagates to the CSV (per L53 — flag set != flag consumed).
+# propagates to the CSV (flag set must equal flag consumed).
 # =============================================================================
 
 set -eo pipefail
@@ -44,14 +44,14 @@ if ! $OLLAMA list | grep -q "^qwen2.5:7b"; then $OLLAMA pull qwen2.5:7b; fi
 
 cd $NR_ROOT/code
 SMOKE_OUT=$NR_ROOT/code/results/full/qoe_calfrac/by_task/smoke
-# L51: clean state per run.
+# Clean state per run.
 rm -rf $SMOKE_OUT
 mkdir -p $SMOKE_OUT
 SHARED_FLAGS=(--dataset D1 --strategies homogeneous,qoe_optimised --weight-presets balanced \
     --seeds 42 --backends "tier_mid:ollama/qwen2.5:7b" --max-events 50)
 
 # Two cal-frac points exercise the flag plumbing.
-# L53 prevention: pass the directory label from bash, never reconstruct
+# Flag-propagation: pass the directory label from bash, never reconstruct
 # from a float in python (str(0.10) normalises to '0.1', mismatch).
 declare -A CELL_DIRS
 for FRAC in 0.10 0.20; do
@@ -63,7 +63,7 @@ for FRAC in 0.10 0.20; do
     CELL_DIRS[$FRAC]="$SMOKE_OUT/$DIRNAME"
 done
 
-# L53 flag-propagation check: verify the recorded calibration_fraction in
+# Flag-propagation check: verify the recorded calibration_fraction in
 # each CSV matches the value passed on the CLI. Read the column directly
 # from the CSV — do not reconstruct paths in python.
 python -c "
@@ -75,13 +75,13 @@ checks = [
 for frac, p in checks:
     df = pd.read_csv(p)
     if 'calibration_fraction' not in df.columns:
-        print(f'FAIL L53: {p} has no calibration_fraction column (run_qoe.py did not record the flag)')
+        print(f'FAIL flag-propagation: {p} has no calibration_fraction column (run_qoe.py did not record the flag)')
         sys.exit(1)
     seen = df['calibration_fraction'].unique()
     if not (len(seen) == 1 and abs(seen[0] - frac) < 1e-9):
-        print(f'FAIL L53 flag-propagation: {p} has calibration_fraction={seen}, expected {frac}')
+        print(f'FAIL flag-propagation: {p} has calibration_fraction={seen}, expected {frac}')
         sys.exit(1)
-    print(f'PASS L53: {p} carries calibration_fraction={frac}')
+    print(f'PASS flag-propagation: {p} carries calibration_fraction={frac}')
 "
 
 echo "=== DONE qoe-calfrac smoke ==="

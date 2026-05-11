@@ -102,7 +102,7 @@ class OllamaEmbeddings:
         embeddings = []
         for text in texts:
             # Use urllib instead of httpx — httpx triggers vfork cascade
-            # on LXD containers with cgroup CPU limits (L46)
+            # on LXD containers with cgroup CPU limits.
             data = _json.dumps({"model": self.model_name, "input": text}).encode()
             req = urllib.request.Request(
                 f"{self.base_url}/api/embed",

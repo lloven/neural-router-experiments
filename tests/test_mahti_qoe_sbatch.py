@@ -63,8 +63,8 @@ def test_smoke_uses_gputest_partition():
     assert "--partition=gputest" in text
 
 
-def test_smoke_validates_csv_with_l30_check():
-    """Per L30, a smoke must verify CSV CONTENT (data rows present), not
+def test_smoke_validates_csv_with_content_check():
+    """A smoke must verify CSV CONTENT (data rows present), not
     just file existence."""
     text = SMOKE.read_text()
     assert re.search(r"\$\{?SMOKE_CSV\}?", text), \

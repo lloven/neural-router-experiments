@@ -1,6 +1,6 @@
 # params.yaml -- DVC-tracked experiment parameters
 #
-# Three test levels per L24 (lessons.md):
+# Three test levels:
 #   unit_smoke        -- seconds; catches imports, API keys, basic logic
 #   integration_smoke -- minutes; representative subset, all stage types
 #   full              -- complete experimental design

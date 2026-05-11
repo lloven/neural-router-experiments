@@ -18,9 +18,17 @@ figs/
 .env
 remote.yaml
 
-# Operations log (contains runtime data, budget info; template is tracked)
+# Operations log (internal: contains runtime data, budget info, restart procedures)
 OPERATIONS_LOG.md
+OPERATIONS_LOG.template.md
 logs/
 
 # OS
 .DS_Store
+
+# Internal working documents (kept local, not published)
+docs/plans/
+docs/theoretical-analysis/
+docs/5.9.1-and-5.9.2-prose-template.md
+docs/gpu-vm-diagnostics.md
+tasks/

@@ -1,6 +1,6 @@
 """Static checks: each smoke script accepts SMOKE_LEVEL={integration,full}
-and the integration level uses --max-events <= 100 (per L23 — proper
-multi-level smoke testing, not full-corpus single points)."""
+and the integration level uses --max-events <= 100 (proper multi-level
+smoke testing, not full-corpus single points)."""
 from __future__ import annotations
 
 from pathlib import Path

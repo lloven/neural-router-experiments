@@ -11,7 +11,8 @@ The analyzer (analyze_blackbox.py) must:
 2. Detect load spikes
 3. Correlate NFS ops with load changes
 
-See: L44 (one step at a time), L45 (don't repeat without changes)
+Debugging principles applied: change one thing at a time, never repeat
+a failing command without changing inputs.
 """
 import json
 import os
@@ -40,7 +41,7 @@ class TestBlackboxExists:
 
 
 class TestBlackboxNoFork:
-    """The recorder MUST NOT fork in its main loop (L44).
+    """The recorder MUST NOT fork in its main loop (fork-cascade safety).
 
     Allowed exceptions:
     - nvidia-smi (in a clearly guarded block, every 5th iteration)

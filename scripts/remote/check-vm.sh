@@ -10,7 +10,7 @@
 
 set -euo pipefail
 
-SSH_HOST="${NROUTER_SSH_HOST:-nrouter-vm}"
+SSH_HOST="${NROUTER_SSH_HOST:-remote-host}"
 REMOTE_DIR="${NROUTER_REMOTE_DIR:-~/neural-router}"
 
 # --- Helpers -----------------------------------------------------------------

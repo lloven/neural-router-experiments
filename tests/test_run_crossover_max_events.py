@@ -1,4 +1,4 @@
-"""Verify scripts/run_crossover.py supports --max-events for L23 unit smoke."""
+"""Verify scripts/run_crossover.py supports --max-events for unit-smoke runs."""
 from __future__ import annotations
 
 import subprocess

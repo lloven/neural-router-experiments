@@ -3,7 +3,7 @@
 The cost-validation campaign re-runs a small representative grid of
 (config, k) cells with the new per-cluster logging in place, so that
 fig:cost-validation can plot honest predicted-vs-measured I per cluster
-(per L60: figure data gap → fix experiment, not figure).
+(figure data gap → fix the experiment, not the figure).
 """
 from __future__ import annotations
 

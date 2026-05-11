@@ -17,7 +17,7 @@ from typing import Optional
 class RemoteConfig:
     """Configuration for the remote GPU VM."""
 
-    ssh_host: str = "nrouter-vm"
+    ssh_host: str = "remote-host"
     remote_dir: str = "~/neural-router"
     venv_path: str = "~/neural-router/.venv"
     ollama_model: str = "qwen2.5:7b"

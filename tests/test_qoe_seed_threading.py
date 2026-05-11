@@ -1,4 +1,4 @@
-"""TDD for L65: per-seed calibration-sample stochasticity.
+"""TDD for per-seed calibration-sample stochasticity.
 
 Audit found that QoEAssigner._sample_calibration_events used a hardcoded
 np.random.RandomState(42), so every seed in --seeds 42,123,456,789,0 drew
@@ -6,9 +6,9 @@ the same calibration sample. The 5-seed CI95 was therefore measuring
 k-means + LLM jitter, not calibration-sample stochasticity. These tests
 pin the seed-threading contract.
 
-Lessons applied:
-  L31 — TDD: every fix gets a failing test before any implementation.
-  L65 — Hardcoded RNG seeds in seeded experiments are statistical theatre.
+Design principles applied:
+  - TDD: every fix gets a failing test before any implementation.
+  - Hardcoded RNG seeds in seeded experiments are statistical theatre.
 """
 from __future__ import annotations
 
@@ -26,7 +26,7 @@ def synthetic_events():
 
 
 def test_qoe_assigner_accepts_seed_parameter():
-    """L65: QoEAssigner.__init__ must accept a seed parameter (default 42 for
+    """QoEAssigner.__init__ must accept a seed parameter (default 42 for
     backwards compatibility with pre-fix tests)."""
     from src.qoe import QoEAssigner
     a = QoEAssigner(clusters=[], backends=["x"], seed=123)
@@ -36,7 +36,7 @@ def test_qoe_assigner_accepts_seed_parameter():
 
 
 def test_different_seeds_produce_different_calibration_samples(synthetic_events):
-    """L65 core claim: with different seeds, the calibration sample composition
+    """Core claim: with different seeds, the calibration sample composition
     must differ (otherwise the 5-seed CI is statistical theatre)."""
     from src.qoe import QoEAssigner
 
@@ -67,7 +67,7 @@ def test_same_seed_produces_identical_sample(synthetic_events):
 
 
 def test_calibrate_router_config_uses_assigner_seed():
-    """L65: the RouterConfig built inside QoEAssigner.calibrate() must use
+    """The RouterConfig built inside QoEAssigner.calibrate() must use
     self.seed, not a hardcoded 42. Pre-fix the 'seed=42' in src/qoe.py:521
     overrode the assigner's seed; this test pins that line."""
     import inspect
@@ -84,7 +84,7 @@ def test_calibrate_router_config_uses_assigner_seed():
 
 
 def test_run_qoe_passes_seed_to_assigner():
-    """L65: scripts/run_qoe.py:438 (QoEAssigner instantiation) must thread the
+    """scripts/run_qoe.py:438 (QoEAssigner instantiation) must thread the
     outer per-seed seed into the assigner constructor."""
     from pathlib import Path
     src = (

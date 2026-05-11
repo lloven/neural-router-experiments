@@ -20,7 +20,7 @@ class TestRemoteConfigLoading:
         from src.remote import RemoteConfig, load_remote_config
 
         yaml_content = (
-            "ssh_host: nrouter-vm\n"
+            "ssh_host: remote-host\n"
             "remote_dir: ~/neural-router\n"
             "venv_path: ~/neural-router/.venv\n"
             "ollama_model: qwen2.5:7b\n"
@@ -30,7 +30,7 @@ class TestRemoteConfigLoading:
 
         config = load_remote_config(cfg_file)
         assert isinstance(config, RemoteConfig)
-        assert config.ssh_host == "nrouter-vm"
+        assert config.ssh_host == "remote-host"
         assert config.remote_dir == "~/neural-router"
         assert config.venv_path == "~/neural-router/.venv"
         assert config.ollama_model == "qwen2.5:7b"
@@ -71,7 +71,7 @@ class TestRemoteConfigLoading:
         clean_env = {k: v for k, v in os.environ.items() if not k.startswith("NROUTER_")}
         with patch.dict(os.environ, clean_env, clear=True):
             config = load_remote_config(config_path=None)
-        assert config.ssh_host == "nrouter-vm"  # default
+        assert config.ssh_host == "remote-host"  # default
         assert config.remote_dir == "~/neural-router"  # default
 
     def test_dataclass_fields(self):

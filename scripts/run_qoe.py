@@ -63,7 +63,7 @@ DEFAULT_SEEDS = [42, 123, 456, 789, 0]
 def _append_row(row: dict, path: Path):
     """Append a single result row to a CSV, creating it with header if needed.
 
-    L51: fail-fast on schema drift. If the CSV exists with a header that
+    Fail-fast on schema drift. If the CSV exists with a header that
     doesn't match the row's keys, raise rather than appending mixed-width
     rows that downstream pandas.read_csv cannot parse.
     """
@@ -84,7 +84,7 @@ def _append_row(row: dict, path: Path):
 
 
 def _write_progress(output_dir: Path, payload: dict) -> None:
-    """L63: per-batch progress writer. Atomic write to .progress.json so
+    """Per-batch progress writer. Atomic write to .progress.json so
     a mid-run reader sees a consistent snapshot.
 
     Writes through a tmp file + rename so partial writes are never visible.
@@ -323,7 +323,7 @@ def run_qoe_experiment(
     csv_path = output_dir / f"qoe_{dataset.short_name}.csv"
     rows = []
 
-    # L63: estimate total cells for the progress reporter
+    # Estimate total cells for the progress reporter
     n_homogeneous = len(backend_names) if "homogeneous" in strategies else 0
     n_round_robin = 1 if "round_robin" in strategies else 0
     n_qoe = len(weight_presets) if "qoe_optimised" in strategies else 0
@@ -555,7 +555,7 @@ def parse_args():
     parser.add_argument("--mode", type=str, default=None)
     parser.add_argument(
         "--max-events", type=int, default=None,
-        help="Truncate the dataset to this many events for L23 smoke runs. "
+        help="Truncate the dataset to this many events for smoke runs. "
              "Default: full corpus.",
     )
     # H4: calibration-fraction flag (TAAS round-1 reviewer mandate).
@@ -587,17 +587,17 @@ def parse_args():
     parser.add_argument(
         "--backend-to-fail", type=str, default=None,
         help="failure_injection: name of the backend to mark as failed for "
-             "events >= injection-event-index. Per L41, target ONE of N "
-             "backends, not all.",
+             "events >= injection-event-index. Target ONE of N backends, "
+             "not all (partial-degradation experiment).",
     )
-    # L65: matched-pair LLM-call cache. When set, all LLMClient instances
+    # Matched-pair LLM-call cache. When set, all LLMClient instances
     # share a single JSONL cache; baseline + perturbed runs that share the
     # same cache file see identical LLM responses for identical (model,
     # prompt) pairs, neutralising LLM-nondeterminism from the matched-cell
     # comparison.
     parser.add_argument(
         "--llm-cache", type=str, default=None,
-        help="L65: path to a JSONL LLM-call cache shared across baseline and "
+        help="Path to a JSONL LLM-call cache shared across baseline and "
              "perturbed runs to neutralise LLM-nondeterminism in matched-pair "
              "analysis. Default: no cache (every call hits the API).",
     )
@@ -606,7 +606,7 @@ def parse_args():
 
 def _build_perturbation_from_args(args) -> PerturbationSpec | None:
     """Construct a PerturbationSpec from argparse args, or return None for
-    the no-op kind. Raises ValueError on malformed config (per L39)."""
+    the no-op kind. Raises ValueError on malformed config."""
     if args.perturbation == "none":
         return None
     kind = args.perturbation
@@ -650,7 +650,7 @@ def main():
 
     # Parse backends
     llm_clients = {}
-    cache_path = args.llm_cache  # L65: shared cache path across all backends
+    cache_path = args.llm_cache  # shared cache path across all backends
     for pair in args.backends.split(","):
         name, model_id = pair.split(":", 1)
         if args.dry_run:

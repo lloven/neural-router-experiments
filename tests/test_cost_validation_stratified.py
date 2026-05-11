@@ -5,8 +5,9 @@ operates in the trivial regime (m_c <= b_max(c) — model collapses to
 identity, miss is uninformative) or the non-trivial regime (m_c > b_max(c)
 — cost model is genuinely under test, miss matters).
 
-Per L31: this test was written BEFORE analysis/cost_validation_stratified.py
-existed (RED). Per L60: the stratification justifies a §5.4 paragraph claim.
+This test was written BEFORE analysis/cost_validation_stratified.py
+existed (RED-phase TDD). The stratification justifies a §5.4
+paragraph claim.
 """
 from __future__ import annotations
 

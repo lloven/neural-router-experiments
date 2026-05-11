@@ -13,7 +13,7 @@
 # =============================================================================
 # Cost-model validation re-run with per-cluster logging (gputest, 15 min).
 #
-# SMOKE_LEVEL parametric (per L23 multi-level smoke testing):
+# SMOKE_LEVEL parametric (multi-level smoke testing):
 #   integration: A0 × k=1 × seed=42 × --max-events 50, ~1 min on gputest.
 #                Validates Ollama + per-cluster CSV path on actual GPU.
 #   full       : A0,A3 × k∈{1,5,19} × seed=42 × --max-events 1000.
@@ -74,7 +74,7 @@ python scripts/run_cost_validation.py \
     --llm-model ollama/qwen2.5:7b \
     --output-dir $OUT_DIR
 
-# L30 content check.
+# CSV content check (data row present, not just file existence).
 OUT_CSV=$OUT_DIR/cost_validation_D1.csv
 if [ -s "$OUT_CSV" ] && [ "$(wc -l < "$OUT_CSV")" -gt 1 ]; then
     echo "PASS: cost-validation CSV has data"

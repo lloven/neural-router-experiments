@@ -51,7 +51,7 @@ if ! $OLLAMA list | grep -q "^qwen2.5:7b"; then
     $OLLAMA pull qwen2.5:7b
 fi
 
-# L23 multi-level smoke: integration (50 events, ~1 min) → full (1000 events, ~10 min).
+# Multi-level smoke: integration (50 events, ~1 min) → full (1000 events, ~10 min).
 # Default integration so accidental re-submission is cheap; full requires
 # explicit SMOKE_LEVEL=full export.
 SMOKE_LEVEL=${SMOKE_LEVEL:-integration}
@@ -78,7 +78,7 @@ python scripts/run_crossover.py \
     --llm-timeout 600 \
     --max-events $MAX_E
 
-# L30 content check.
+# CSV content check (data row present, not just file existence).
 SMOKE_CSV=$SMOKE_OUT/crossover_D1.csv
 if [ -s "$SMOKE_CSV" ] && [ "$(wc -l < "$SMOKE_CSV")" -gt 1 ]; then
     echo "PASS smoke: CSV has data"

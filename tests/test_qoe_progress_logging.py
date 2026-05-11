@@ -1,5 +1,6 @@
-"""L63 regression: run_qoe.py must emit per-cell progress to .progress.json
-during the sweep. Atomic writes (no partial visibility); readable mid-run.
+"""Per-cell progress logging: run_qoe.py must emit per-cell progress to
+.progress.json during the sweep. Atomic writes (no partial visibility);
+readable mid-run. Catches silent stalls in long sweeps.
 """
 from __future__ import annotations
 import json

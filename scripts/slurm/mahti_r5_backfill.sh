@@ -23,10 +23,11 @@
 # Estimated runtime ~30 min/task (matches Puhti V100 baseline within 1.5x);
 # 2h walltime per task is comfortable.
 #
-# L51: per-task isolated output dir (results/full/ablation/by_task/$TAG);
+# Per-task isolated output dir (results/full/ablation/by_task/$TAG);
 # does NOT touch existing s42/s123/s456/s1024 cells outside reseed scope.
-# L53: --seeds value passed as int-string; written verbatim to CSV via the
-# canonical _append_row path in run_experiment.py. Verified post-run.
+# Flag-propagation: --seeds value passed as int-string; written verbatim
+# to CSV via the canonical _append_row path in run_experiment.py.
+# Verified post-run.
 # =============================================================================
 
 set -eo pipefail
@@ -75,7 +76,7 @@ fi
 
 cd $NR_ROOT/code
 TASK_OUT=$NR_ROOT/code/results/full/ablation/by_task/$TAG
-# L51: only mkdir; do NOT rm existing cells.
+# Only mkdir; do NOT rm existing cells.
 mkdir -p $TASK_OUT
 
 python scripts/run_experiment.py \
@@ -90,14 +91,14 @@ python scripts/run_experiment.py \
     --output-dir $TASK_OUT \
     --resume
 
-# L30 / L53: verify the new row landed with expected seed value.
+# Verify the new row landed with expected seed value.
 RESULTS_CSV=$(ls $TASK_OUT/*.csv 2>/dev/null | head -1)
 if [ ! -s "$RESULTS_CSV" ]; then
     echo "FAIL: no CSV output in $TASK_OUT"
     exit 1
 fi
 if ! awk -F, -v s="$SEED" 'NR>1 && $3==s {found=1} END{exit !found}' "$RESULTS_CSV"; then
-    echo "FAIL: seed=$SEED not present in $RESULTS_CSV (L53 round-trip violated)"
+    echo "FAIL: seed=$SEED not present in $RESULTS_CSV (flag round-trip violated)"
     exit 1
 fi
 echo "PASS $TAG: seed=$SEED present"
