@@ -117,7 +117,7 @@ def main() -> int:
         # source of truth for panel); no CSV produced here.
         print("  panel CSVs not found; skipping panel CI generation")
     else:
-        print(f"  found {len(panel_files)} panel CSVs (TODO: aggregate)")
+        print(f"  found {len(panel_files)} panel CSVs (manual aggregation; see manuscript caption)")
 
     # ---- Headline Wilcoxon pairs --------------------------------------------
     # Three pairs the AE letter explicitly asks for:
